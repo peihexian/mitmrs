@@ -1,0 +1,162 @@
+use chrono::Utc;
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use mitmrs::decode;
+use mitmrs::model::{FlowRecord, HeaderEntry};
+use serde_json::json;
+use std::io::Write;
+
+fn record(req_body: &[u8], resp_body: &[u8]) -> FlowRecord {
+    let mut rec = FlowRecord::new(
+        "test-flow".into(),
+        Utc::now(),
+        "127.0.0.1:12345".into(),
+        "https".into(),
+        "api.example.com".into(),
+        443,
+        "POST".into(),
+        "/pkg.Service/Call".into(),
+        None,
+        "HTTP/2.0".into(),
+        Some("api.example.com".into()),
+    );
+    rec.request_headers = vec![HeaderEntry::new("content-type", "application/grpc")];
+    rec.response_headers = vec![HeaderEntry::new("content-type", "application/grpc")];
+    rec.request_body = req_body.to_vec();
+    rec.request_body_size = req_body.len() as u64;
+    rec.response_body = resp_body.to_vec();
+    rec.response_body_size = resp_body.len() as u64;
+    rec.protocol = "grpc".into();
+    rec
+}
+
+fn grpc_frame(flag: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = vec![flag];
+    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+#[test]
+fn decodes_grpc_protobuf_without_schema() {
+    let payload = b"\x0a\x05hello\x10\x2a";
+    let rec = record(b"", &grpc_frame(0, payload));
+    let result = decode::decode_record(&rec, "response", "grpc", &json!({}), 1_000_000).unwrap();
+    assert_eq!(result.format, "grpc");
+    assert!(result.summary.contains("1 gRPC"));
+    let frames = result.tree["frames"].as_array().unwrap();
+    let protobuf = frames[0]["protobuf"].as_array().unwrap();
+    assert_eq!(protobuf[0]["field"], 1);
+    assert_eq!(protobuf[0]["string"], "hello");
+    assert_eq!(protobuf[1]["field"], 2);
+    assert_eq!(protobuf[1]["int64"], 42);
+    assert!(protobuf[0].get("packed").is_none());
+    assert!(result.text.unwrap().contains("hello"));
+}
+
+#[test]
+fn decodes_compressed_grpc_message() {
+    let payload = b"\x0a\x05hello\x10\x2a";
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(payload).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let frame = grpc_frame(1, &compressed);
+    let mut rec = record(b"", &frame);
+    rec.response_headers
+        .push(HeaderEntry::new("grpc-encoding", "gzip"));
+    let result = decode::decode_record(&rec, "response", "grpc", &json!({}), 1_000_000).unwrap();
+    assert!(result.summary.contains("1 compressed"));
+    let protobuf = result.tree["frames"][0]["protobuf"].as_array().unwrap();
+    assert_eq!(protobuf[1]["int64"], 42);
+}
+
+#[test]
+fn auto_decompresses_gzip_json() {
+    let raw = br#"{"gzip":true,"message":"hello"}"#;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(raw).unwrap();
+    let gz = encoder.finish().unwrap();
+    let mut rec = record(b"", &gz);
+    rec.response_headers = vec![
+        HeaderEntry::new("content-type", "application/json"),
+        HeaderEntry::new("content-encoding", "gzip"),
+    ];
+    rec.response_mime = Some("application/json".into());
+    let result = decode::decode_record(&rec, "response", "auto", &json!({}), 1_000_000).unwrap();
+    assert_eq!(result.detected.as_deref(), Some("json"));
+    assert_eq!(result.tree["gzip"], true);
+    assert_eq!(result.tree["message"], "hello");
+}
+
+#[test]
+fn decodes_nested_protobuf_and_packed_values() {
+    // field 3 (message) { field 1: "abc" }, field 4 (packed): [1,2,300]
+    let inner = b"\x0a\x03abc";
+    let mut msg = Vec::new();
+    msg.extend_from_slice(&[0x1a, inner.len() as u8]);
+    msg.extend_from_slice(inner);
+    msg.extend_from_slice(&[0x22, 4, 0x01, 0x02, 0xac, 0x02]);
+    let rec = record(b"", &msg);
+    let result =
+        decode::decode_record(&rec, "response", "protobuf", &json!({}), 1_000_000).unwrap();
+    let fields = result.tree["fields"].as_array().unwrap();
+    assert_eq!(fields[0]["field"], 3);
+    assert_eq!(fields[0]["message"][0]["string"], "abc");
+    assert_eq!(fields[1]["packed"], json!([1, 2, 300]));
+}
+
+#[test]
+fn decodes_gbk_text() {
+    // "中文" in GBK.
+    let rec = {
+        let mut rec = record(b"", b"\xd6\xd0\xce\xc4");
+        rec.response_headers = vec![HeaderEntry::new("content-type", "text/plain; charset=gbk")];
+        rec
+    };
+    let result = decode::decode_record(&rec, "response", "text", &json!({}), 1_000_000).unwrap();
+    assert_eq!(result.text.unwrap(), "中文");
+}
+
+#[test]
+fn parses_tls_client_hello_sni() {
+    let sni = b"api.example.com";
+    let mut sni_ext = Vec::new();
+    sni_ext.extend_from_slice(&((sni.len() + 3) as u16).to_be_bytes());
+    sni_ext.push(0);
+    sni_ext.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+    sni_ext.extend_from_slice(sni);
+    let mut ext = Vec::new();
+    ext.extend_from_slice(&0u16.to_be_bytes());
+    ext.extend_from_slice(&(sni_ext.len() as u16).to_be_bytes());
+    ext.extend_from_slice(&sni_ext);
+    let mut body = Vec::new();
+    body.extend_from_slice(&[0x03, 0x03]);
+    body.extend_from_slice(&[0u8; 32]);
+    body.push(0); // session id
+    body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]); // cipher suites
+    body.extend_from_slice(&[0x01, 0x00]); // compression
+    body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+    body.extend_from_slice(&ext);
+    let mut hs = vec![0x01];
+    hs.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+    hs.extend_from_slice(&body);
+    assert_eq!(
+        decode::formats::parse_client_hello_sni(&hs).as_deref(),
+        Some("api.example.com")
+    );
+}
+
+#[test]
+fn decodes_form_and_websocket() {
+    let rec = record(b"name=%E5%BC%A0%E4%B8%89&n=42", b"");
+    let result = decode::decode_record(&rec, "request", "form", &json!({}), 1_000_000).unwrap();
+    assert_eq!(result.tree["fields"][0]["value"], "张三");
+
+    let mut frame = vec![0x81, 0x05];
+    frame.extend_from_slice(b"hello");
+    let rec = record(b"", &frame);
+    let result =
+        decode::decode_record(&rec, "response", "websocket", &json!({}), 1_000_000).unwrap();
+    assert_eq!(result.tree["frames"][0]["opcode_name"], "text");
+    assert_eq!(result.tree["frames"][0]["text"], "hello");
+}
