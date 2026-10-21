@@ -151,13 +151,7 @@ async fn proxy_request(
         version: version_text,
     };
 
-    let upstream_req = build_upstream_request(
-        &parts.method,
-        &parts.headers,
-        parts.version,
-        &target,
-        collected,
-    )?;
+    let upstream_req = build_upstream_request(&parts.method, &parts.headers, &target, collected)?;
     let response = match state.upstream.send(upstream_req).await {
         Ok(r) => r,
         Err(e) => {
@@ -390,14 +384,18 @@ fn http_version_string(version: Version) -> String {
 fn build_upstream_request(
     method: &Method,
     headers: &HeaderMap,
-    version: Version,
     target: &Target,
     body: Bytes,
 ) -> Result<Request<Full<Bytes>>, String> {
+    let upstream_version = if crate::upstream::is_native_grpc(headers) {
+        Version::HTTP_2
+    } else {
+        Version::HTTP_11
+    };
     let mut builder = Request::builder()
         .method(method.clone())
         .uri(target.absolute_uri.clone())
-        .version(version);
+        .version(upstream_version);
     let hop = connection_tokens(headers);
     for (name, value) in headers.iter() {
         if is_hop_by_hop(name.as_str()) || hop.contains(name.as_str()) {

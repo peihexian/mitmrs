@@ -31,7 +31,7 @@ The proxy is an HTTP/1.1 proxy for ordinary requests and CONNECT:
 
 HTTPS interception requires the client to trust the local CA. Certificates are cached per host and generated on demand. The CA and key are persisted; the root CA is generated with a **10-year (3650-day)** lifetime, backdated one day for clock skew. Deleting the `ca` directory creates a new identity (clients must re-trust it).
 
-Upstream HTTP/2 is negotiated via ALPN. A separate h2c client handles cleartext HTTP/2 (gRPC prior knowledge). gRPC requires `te: trailers`, so that one hop-by-hop header is intentionally preserved.
+Ordinary web traffic is forwarded to upstream as HTTP/1.1 even when the downstream client uses HTTP/2; hyper translates the response back to h2. This avoids gateways (for example APISIX) rejecting h2-translated h1 requests and supports origins that only speak h1. Native gRPC is the exception: it requires end-to-end HTTP/2, with a separate h2 client (and an h2c client for cleartext prior-knowledge gRPC). gRPC requires `te: trailers`, so that one hop-by-hop header is intentionally preserved. Separate connection pools per protocol prevent cross-version reuse.
 
 ## Transparent WinDivert redirect
 

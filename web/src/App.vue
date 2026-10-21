@@ -90,6 +90,8 @@ const status = ref<Status | null>(null)
 const stats = ref<Stats | null>(null)
 const flows = ref<FlowSummary[]>([])
 const total = ref(0)
+const page = ref(1)
+const pageSize = ref(200)
 const loading = ref(false)
 const loadError = ref<string | null>(null)
 const selectedId = ref<string | null>(null)
@@ -131,6 +133,9 @@ const mcpEndpoint = computed(() => {  const value = status.value?.mcp.endpoint |
 const storedFlowCount = computed(
   () => status.value?.store.flows ?? stats.value?.total ?? total.value,
 )
+const pageCount = computed(() =>
+  Math.max(1, Math.ceil(total.value / Math.max(1, pageSize.value))),
+)
 const selectedForDetail = computed(
   () =>
     flows.value.find((flow) => flow.id === selectedId.value) ??
@@ -149,6 +154,10 @@ const confirmMessage = computed(() => {
 })
 function handleFlowEvent(flow: FlowSummary): void {
   if (!live.value) return
+  if (page.value !== 1) {
+    scheduleLiveRefresh()
+    return
+  }
   const index = flows.value.findIndex((item) => item.id === flow.id)
   if (index >= 0) {
     const next = [...flows.value]
@@ -163,7 +172,7 @@ function handleFlowEvent(flow: FlowSummary): void {
     filters.direction === 'both' &&
     matchesFilters(flow, filters)
   ) {
-    flows.value = [flow, ...flows.value].slice(0, 500)
+    flows.value = [flow, ...flows.value].slice(0, pageSize.value)
     total.value += 1
     if (selectedId.value === flow.id) selectedSummary.value = flow
   }
@@ -218,11 +227,18 @@ async function loadFlows(silent = false): Promise<void> {
   flowController = controller
   if (!silent) loading.value = true
   try {
-    const response = await api.getFlows(filters, 500, 0, controller.signal)
+    const offset = (page.value - 1) * pageSize.value
+    const response = await api.getFlows(filters, pageSize.value, offset, controller.signal)
     if (requestId !== flowRequestId) return
     flows.value = Array.isArray(response.items) ? response.items : []
     total.value = response.total ?? flows.value.length
     loadError.value = null
+    const maxPage = Math.max(1, Math.ceil(total.value / Math.max(1, pageSize.value)))
+    if (page.value > maxPage) {
+      page.value = maxPage
+      await loadFlows(silent)
+      return
+    }
   } catch (error) {
     if (requestId === flowRequestId && !isAbortError(error)) {
       loadError.value = errorMessage(error)
@@ -280,6 +296,8 @@ function scheduleFilterLoad(): void {
   if (filterTimer != null) window.clearTimeout(filterTimer)
   filterTimer = window.setTimeout(() => {
     filterTimer = null
+    page.value = 1
+    closeDetail()
     void loadFlows()
   }, 260)
 }
@@ -297,6 +315,7 @@ function scheduleUrlUpdate(): void {
 }
 
 function clearFilters(): void {
+  page.value = 1
   Object.assign(filters, {
     q: '',
     host: '',
@@ -421,6 +440,7 @@ async function runConfirm(): Promise<void> {
   try {
     if (pending.kind === 'clear') {
       const result = await api.clearFlows()
+      page.value = 1
       closeDetail()
       toastSuccess('Captured flows cleared', `${result.deleted} flow(s) deleted.`)
     } else {
@@ -438,9 +458,26 @@ async function runConfirm(): Promise<void> {
 }
 
 function onImported(_result: ImportResult): void {
+  page.value = 1
   void loadFlows(true)
   void loadStats()
   void refreshStatus(true)
+}
+
+function goToPage(next: number): void {
+  const target = Math.max(1, Math.min(pageCount.value, Math.trunc(next)))
+  if (target === page.value) return
+  page.value = target
+  closeDetail()
+  void loadFlows()
+}
+
+function changePageSize(size: number): void {
+  if (![100, 200, 500].includes(size) || size === pageSize.value) return
+  pageSize.value = size
+  page.value = 1
+  closeDetail()
+  void loadFlows()
 }
 
 function onStatusUpdated(next: Status): void {
@@ -591,10 +628,15 @@ onBeforeUnmount(() => {
           :proxy-address="proxyAddr"
           :mcp-endpoint="mcpEndpoint"
           :proxy-state="status?.proxy.state ?? 'connecting'"
+          :page="page"
+          :page-size="pageSize"
+          :page-count="pageCount"
           :error="flows.length ? null : loadError"
           @select="selectFlow"
           @clear="clearFilters"
           @refresh="manualRefresh"
+          @page="goToPage"
+          @page-size="changePageSize"
           @start="onProxyAction('start')"
           @copy-address="copyProxyAddress"
           @open-mcp="openModal('mcp')"

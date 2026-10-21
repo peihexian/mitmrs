@@ -34,6 +34,9 @@ const props = withDefaults(
     proxyAddress: string
     mcpEndpoint: string
     proxyState: ProxyState | 'connecting'
+    page: number
+    pageSize: number
+    pageCount: number
     error?: string | null
   }>(),
   { error: null },
@@ -44,6 +47,8 @@ const emit = defineEmits<{
   clear: []
   refresh: []
   start: []
+  page: [page: number]
+  'page-size': [size: number]
   'copy-address': []
   'open-mcp': []
   'open-ca': []
@@ -81,6 +86,10 @@ const showFilterEmpty = computed(
 const selectedIndex = computed(() =>
   props.flows.findIndex((flow) => flow.id === props.selectedId),
 )
+const pageStart = computed(() =>
+  props.total === 0 ? 0 : (props.page - 1) * props.pageSize + 1,
+)
+const pageEnd = computed(() => pageStart.value + Math.max(0, props.flows.length - 1))
 
 function selectFlow(id: string): void {
   emit('select', id)
@@ -148,6 +157,11 @@ function onScroll(): void {
   scrollTop.value = viewport.value?.scrollTop ?? 0
 }
 
+function onPageSizeChange(event: Event): void {
+  const value = Number((event.target as HTMLSelectElement).value)
+  if (Number.isFinite(value) && value > 0) emit('page-size', value)
+}
+
 function measure(): void {
   if (!viewport.value) return
   viewportHeight.value = viewport.value.clientHeight
@@ -158,6 +172,17 @@ watch([() => props.selectedId, () => props.flows], async () => {
   await nextTick()
   ensureSelectedVisible()
 })
+
+watch(
+  () => props.page,
+  async () => {
+    await nextTick()
+    if (viewport.value) {
+      viewport.value.scrollTop = 0
+      scrollTop.value = 0
+    }
+  },
+)
 
 watch(
   viewport,
@@ -181,7 +206,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="flow-root relative flex min-h-0 flex-1 flex-col overflow-hidden">
+  <div class="flow-table relative flex min-h-0 flex-1 flex-col overflow-hidden">
     <div class="flow-head flow-grid shrink-0" role="row">
       <div class="col-seq flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider text-mist-600">
         <span>#</span>
@@ -468,11 +493,51 @@ onBeforeUnmount(() => {
     </div>
 
     <div
-      v-if="total > flows.length && flows.length > 0"
-      class="flex h-6 shrink-0 items-center justify-between gap-2 border-t border-ink-700/60 bg-ink-925/60 px-3 text-[9px] text-mist-700"
+      v-if="total > 0"
+      class="flex h-8 shrink-0 items-center justify-between gap-2 border-t border-ink-700/60 bg-ink-925/60 px-3 text-[9px] text-mist-700"
     >
-      <span>Showing the latest {{ formatNumber(flows.length) }} of {{ formatNumber(total) }} matching flows</span>
-      <span class="hidden sm:inline">Refine filters to narrow the result</span>
+      <span class="mono tabular-nums">
+        Rows {{ formatNumber(pageStart) }}–{{ formatNumber(pageEnd) }} of
+        {{ formatNumber(total) }}
+      </span>
+      <div class="flex items-center gap-1">
+        <label class="hidden items-center gap-1 sm:flex">
+          <span>Per page</span>
+          <select
+            class="h-5 rounded border border-ink-700 bg-ink-950 px-1 text-[9px] text-mist-400 outline-none"
+            :value="pageSize"
+            aria-label="Rows per page"
+            @change="onPageSizeChange"
+          >
+            <option :value="100">100</option>
+            <option :value="200">200</option>
+            <option :value="500">500</option>
+          </select>
+        </label>
+        <button
+          class="icon-btn icon-btn-tiny"
+          type="button"
+          title="Previous page"
+          aria-label="Previous page"
+          :disabled="page <= 1"
+          @click="emit('page', page - 1)"
+        >
+          <AppIcon name="chevron-right" :size="10" class="rotate-180" />
+        </button>
+        <span class="mono min-w-[62px] text-center tabular-nums">
+          Page {{ formatNumber(page) }} / {{ formatNumber(Math.max(1, pageCount)) }}
+        </span>
+        <button
+          class="icon-btn icon-btn-tiny"
+          type="button"
+          title="Next page"
+          aria-label="Next page"
+          :disabled="page >= pageCount"
+          @click="emit('page', page + 1)"
+        >
+          <AppIcon name="chevron-right" :size="10" />
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -537,7 +602,7 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid rgba(33, 48, 64, 0.26);
 }
 
-.flow-root {
+.flow-table {
   container-type: inline-size;
 }
 

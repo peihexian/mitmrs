@@ -30,52 +30,80 @@ static NEXT_UPSTREAM_PORT: AtomicU16 = AtomicU16::new(UPSTREAM_PORT_MIN);
 
 #[derive(Clone)]
 pub struct UpstreamClient {
-    client: Client<Connector, Full<Bytes>>,
-    h2c_client: Client<Connector, Full<Bytes>>,
+    http1: Client<Connector, Full<Bytes>>,
+    http2: Client<Connector, Full<Bytes>>,
+    h2c: Client<Connector, Full<Bytes>>,
 }
 
 impl UpstreamClient {
     pub fn new(insecure: bool) -> anyhow::Result<Self> {
-        let connector = Connector::new(insecure)?;
-        let client = Client::builder(TokioExecutor::new())
+        // Preserve the client's HTTP version on the upstream leg. Forcing
+        // HTTP/2 for ordinary HTTP/1.1 clients breaks some gateways (APISIX
+        // returns 400 when an h1 request is transformed into h2), while gRPC
+        // needs a real h2 upstream. Separate pools also avoid cross-version
+        // connection reuse.
+        let h1_connector = Connector::new(insecure, &[b"http/1.1"])?;
+        let h2_connector = Connector::new(insecure, &[b"h2"])?;
+        let http1 = Client::builder(TokioExecutor::new())
             .pool_idle_timeout(Duration::from_secs(30))
             .pool_timer(hyper_util::rt::TokioTimer::new())
-            .build(connector.clone());
+            .build(h1_connector.clone());
+        let http2 = Client::builder(TokioExecutor::new())
+            .pool_idle_timeout(Duration::from_secs(30))
+            .pool_timer(hyper_util::rt::TokioTimer::new())
+            .build(h2_connector);
         // Plaintext HTTP/2 (h2c prior knowledge) is common for local gRPC
-        // services. A separate client is required because the normal client
-        // would speak HTTP/1.1 to a cleartext origin.
-        let h2c_client = Client::builder(TokioExecutor::new())
+        // services. The normal client would speak HTTP/1.1 to a cleartext
+        // origin, so force h2 on a separate pool.
+        let h2c = Client::builder(TokioExecutor::new())
             .http2_only(true)
             .pool_idle_timeout(Duration::from_secs(30))
             .pool_timer(hyper_util::rt::TokioTimer::new())
-            .build(connector);
-        Ok(Self { client, h2c_client })
+            .build(h1_connector);
+        Ok(Self { http1, http2, h2c })
     }
 
     pub async fn send(
         &self,
         req: hyper::Request<Full<Bytes>>,
     ) -> Result<hyper::Response<Incoming>, BoxError> {
-        let h2c = req.uri().scheme_str() == Some("http") && req.version() == hyper::Version::HTTP_2;
+        let native_grpc = is_native_grpc(req.headers());
+        let is_http = req.uri().scheme_str() == Some("http");
         let (parts, body) = req.into_parts();
         let req = hyper::Request::from_parts(parts, body);
-        let resp = if h2c {
-            self.h2c_client.request(req).await?
+        // Ordinary web traffic uses HTTP/1.1 upstream even if the client spoke
+        // HTTP/2 to us: some gateways reject h2-translated h1 requests, and
+        // hyper can translate the downstream response back to h2 safely.
+        // Native gRPC is the exception; it requires end-to-end HTTP/2.
+        let resp = if native_grpc && is_http {
+            self.h2c.request(req).await?
+        } else if native_grpc {
+            self.http2.request(req).await?
         } else {
-            self.client.request(req).await?
+            self.http1.request(req).await?
         };
         Ok(resp)
     }
 }
 
+pub fn is_native_grpc(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            let ct = v.to_ascii_lowercase();
+            ct.starts_with("application/grpc") && !ct.contains("grpc-web")
+        })
+        .unwrap_or(false)
+}
+
 #[derive(Clone)]
 pub struct Connector {
     tls: TlsConnector,
-    insecure: bool,
 }
 
 impl Connector {
-    pub fn new(insecure: bool) -> anyhow::Result<Self> {
+    pub fn new(insecure: bool, alpn: &[&[u8]]) -> anyhow::Result<Self> {
         let mut roots = RootCertStore::empty();
         let native = rustls_native_certs::load_native_certs();
         for cert in native.certs {
@@ -86,20 +114,19 @@ impl Connector {
         let mut config = ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
         let config = if insecure {
             let mut cfg = ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(NoVerify::new()?))
                 .with_no_client_auth();
-            cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
             cfg
         } else {
             config
         };
         Ok(Self {
             tls: TlsConnector::from(Arc::new(config)),
-            insecure,
         })
     }
 }
@@ -160,7 +187,6 @@ impl Service<Uri> for Connector {
                     .map_err(|e| format!("TLS handshake with {host}:{port} failed: {e}"))?;
                 Ok(TokioIo::new(UpstreamIo::Tls(tls)))
             } else {
-                let _ = this.insecure;
                 Ok(TokioIo::new(UpstreamIo::Plain(stream)))
             }
         })
@@ -266,8 +292,11 @@ impl Connection for UpstreamIo {
         match self {
             UpstreamIo::Plain(_) => Connected::new(),
             UpstreamIo::Tls(tls) => {
-                let is_h2 = tls.get_ref().1.alpn_protocol() == Some(b"h2");
-                Connected::new().negotiated_h2().proxy(is_h2)
+                if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
+                    Connected::new().negotiated_h2()
+                } else {
+                    Connected::new()
+                }
             }
         }
     }
@@ -320,5 +349,28 @@ impl ServerCertVerifier for NoVerify {
         self.provider
             .signature_verification_algorithms
             .supported_schemes()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::is_native_grpc;
+    use http::HeaderMap;
+
+    fn with_content_type(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(http::header::CONTENT_TYPE, value.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn detects_native_grpc_but_not_grpc_web() {
+        assert!(is_native_grpc(&with_content_type("application/grpc")));
+        assert!(is_native_grpc(&with_content_type("application/grpc+proto")));
+        assert!(!is_native_grpc(&with_content_type("application/grpc-web")));
+        assert!(!is_native_grpc(&with_content_type(
+            "application/grpc-web+proto"
+        )));
+        assert!(!is_native_grpc(&with_content_type("application/json")));
+        assert!(!is_native_grpc(&HeaderMap::new()));
     }
 }

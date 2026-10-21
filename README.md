@@ -29,12 +29,14 @@
 - **两种接入方式**
   - 显式代理：默认 `127.0.0.1:8080`，浏览器、curl、Python/Node SDK 直接设置 HTTP/HTTPS 代理。
   - WinDivert 透明重定向（可选，需管理员）：把本机出站 TCP `:80/:443` 重定向到本地代理，客户端无需配置代理。
-- **Web 分析界面**：流量列表、搜索/过滤、请求/响应/Headers/Trailers、JSON 美化、hex/raw、cURL 生成、SSE 实时刷新、解码树、MCP 示例；支持单条删除与一键清空（带确认）。
+- **Web 分析界面**：流量列表、搜索/过滤、请求/响应/Headers/Trailers、JSON 美化、hex/raw、cURL 生成、SSE 实时刷新、解码树、MCP 示例；支持每页 100/200/500 条翻页、单条删除与一键清空（带确认）。
 - **AI 优先的 MCP 服务**：Streamable HTTP JSON-RPC 2.0 端点 `/mcp`，另有 `mcp-stdio` 桥接模式。AI 可以列出最近流量、分页搜索全部结果、过滤、读取上下行 body、切换解码格式、导出/导入、启停代理。
 - **内置解码器**：auto、HTTP 消息、HTTP/2、gRPC/gRPC-Web、Protobuf（无 `.proto`）、JSON、XML/HTML、表单、multipart、SSE、WebSocket 帧、TLS records/SNI、文本（含 GBK 等字符集）、base64、hex、gzip/deflate/brotli/zstd、raw。
 - **生命周期控制**：启动、停止、暂停、恢复、重启、运行时修改代理端口（自动重启监听）、开启/关闭抓包、MCP 同步控制。
 - **持久化与交换**：SQLite（WAL）保存全部流量；原生 JSON 全量导出/导入（body base64 保真）；HAR 1.2 导出和 HAR 导入。
 - **单文件分发**：Web 资源嵌入 exe；WinDivert DLL/SYS 由构建脚本放到 exe 同目录。
+
+> HTTP 版本处理：普通 Web 流量即使客户端使用 HTTP/2，上游也优先使用 HTTP/1.1 转发，避免只支持 h1 的网关/源站返回 400 或 502；原生 gRPC 才使用端到端 HTTP/2。因此列表中的 `http_version` 表示客户端到 MitmRs 的协议，不一定等于 MitmRs 到源站的协议。
 
 ## 快速开始
 
@@ -318,6 +320,16 @@ docs/MCP.md           MCP 工具与 AI 工作流
 - 客户端证书（mTLS）、代理链、上游自定义 CA、SOCKS 上游未实现。
 - 请求体在转发前整体缓冲（上限 128 MB），超大上传会返回 502；响应体是流式转发 + 有上限捕获。
 - SQLite 搜索是 `LIKE` 扫描，百万级流量建议先按 host/时间过滤或清理。
+
+## 系统代理下出现 400/502？
+
+0.1.0 的旧构建会把 HTTP/1.1 客户端流量统一用上游 HTTP/2 转发，部分 APISIX/网关会返回 400；只支持 h1 的源站会返回 502。当前版本已改为：
+
+- 普通流量：下游 h1/h2 → 上游 **HTTP/1.1**
+- 原生 gRPC：下游 h2 → 上游 **HTTP/2**
+- 明文 gRPC：h2c prior knowledge
+
+升级后请 **完全退出旧 MitmRs 实例，再启动新的 `dist\mitmrs.exe`**，并重启使用系统代理的应用/浏览器，让旧连接重新建立。历史列表中的 400/502 是修复前的记录，可用顶部 **Clear** 清空后再复测。
 - 默认只监听 `127.0.0.1`。若改为 `0.0.0.0`，API/MCP 没有鉴权，请自行加防火墙或反向代理。
 
 ## 安全
