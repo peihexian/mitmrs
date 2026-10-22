@@ -505,35 +505,67 @@ pub fn decode_tls(data: &[u8], max: usize) -> DecodeResult {
     }
 }
 
-pub fn parse_client_hello_sni(data: &[u8]) -> Option<String> {
-    // data starts with the handshake type byte (0x01).
+/// Metadata extracted from a TLS ClientHello. Used both for picking the leaf
+/// certificate we sign (SNI beats the CONNECT authority) and for recording why a
+/// client rejected our certificate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ClientHelloInfo {
+    pub sni: Option<String>,
+    pub alpn: Vec<String>,
+    /// Advertised versions, highest first when taken from `supported_versions`.
+    pub tls_versions: Vec<String>,
+    pub cipher_count: usize,
+    pub extension_count: usize,
+}
+
+impl ClientHelloInfo {
+    pub fn alpn_text(&self) -> String {
+        self.alpn.join(",")
+    }
+
+    pub fn versions_text(&self) -> String {
+        self.tls_versions.join(",")
+    }
+}
+
+/// Parse a complete ClientHello handshake message (starting at the 0x01 type
+/// byte) into [`ClientHelloInfo`]. Returns `None` for truncated or malformed
+/// input so callers can keep reading from the socket.
+pub fn parse_client_hello(data: &[u8]) -> Option<ClientHelloInfo> {
     if data.len() < 4 || data[0] != 1 {
         return None;
     }
     let len = ((data[1] as usize) << 16) | ((data[2] as usize) << 8) | data[3] as usize;
-    let body = data.get(4..4 + len.min(data.len().saturating_sub(4)))?;
+    if data.len() < 4 + len {
+        return None;
+    }
+    let body = &data[4..4 + len];
     if body.len() < 34 {
         return None;
+    }
+    let mut info = ClientHelloInfo::default();
+    let legacy_version = u16::from_be_bytes([body[0], body[1]]);
+    if let Some(name) = tls_version_name(legacy_version) {
+        info.tls_versions.push(name.to_string());
     }
     let mut p = 34usize;
     let sid_len = *body.get(p)? as usize;
     p += 1 + sid_len;
     if p + 2 > body.len() {
-        return None;
+        return Some(info);
     }
     let cs_len = u16::from_be_bytes([body[p], body[p + 1]]) as usize;
+    info.cipher_count = cs_len / 2;
     p += 2 + cs_len;
-    if p >= body.len() {
-        return None;
-    }
-    let comp_len = body[p] as usize;
+    let comp_len = *body.get(p)? as usize;
     p += 1 + comp_len;
     if p + 2 > body.len() {
-        return None;
+        return Some(info);
     }
     let ext_len = u16::from_be_bytes([body[p], body[p + 1]]) as usize;
     p += 2;
     let end = (p + ext_len).min(body.len());
+    let mut supported_versions = Vec::new();
     while p + 4 <= end {
         let ext_type = u16::from_be_bytes([body[p], body[p + 1]]);
         let elen = u16::from_be_bytes([body[p + 2], body[p + 3]]) as usize;
@@ -541,26 +573,96 @@ pub fn parse_client_hello_sni(data: &[u8]) -> Option<String> {
         if p + elen > end {
             break;
         }
-        if ext_type == 0 && elen >= 5 {
-            let list_len = u16::from_be_bytes([body[p], body[p + 1]]) as usize;
-            let mut q = p + 2;
-            let list_end = (q + list_len).min(p + elen);
-            while q + 3 <= list_end {
-                let name_type = body[q];
-                let name_len = u16::from_be_bytes([body[q + 1], body[q + 2]]) as usize;
-                q += 3;
-                if q + name_len > list_end {
-                    break;
-                }
-                if name_type == 0 {
-                    return String::from_utf8(body[q..q + name_len].to_vec()).ok();
-                }
-                q += name_len;
-            }
+        let ext = &body[p..p + elen];
+        info.extension_count += 1;
+        match ext_type {
+            0 if info.sni.is_none() => info.sni = parse_sni_extension(ext),
+            16 => info.alpn = parse_alpn_extension(ext),
+            43 => supported_versions = parse_supported_versions(ext),
+            _ => {}
         }
         p += elen;
     }
+    if !supported_versions.is_empty() {
+        info.tls_versions = supported_versions;
+    }
+    Some(info)
+}
+
+fn tls_version_name(version: u16) -> Option<&'static str> {
+    match version {
+        0x0304 => Some("1.3"),
+        0x0303 => Some("1.2"),
+        0x0302 => Some("1.1"),
+        0x0301 => Some("1.0"),
+        _ => None,
+    }
+}
+
+fn parse_sni_extension(ext: &[u8]) -> Option<String> {
+    if ext.len() < 5 {
+        return None;
+    }
+    let list_len = u16::from_be_bytes([ext[0], ext[1]]) as usize;
+    let list_end = (2 + list_len).min(ext.len());
+    let mut q = 2usize;
+    while q + 3 <= list_end {
+        let name_type = ext[q];
+        let name_len = u16::from_be_bytes([ext[q + 1], ext[q + 2]]) as usize;
+        q += 3;
+        if q + name_len > list_end {
+            return None;
+        }
+        if name_type == 0 {
+            return String::from_utf8(ext[q..q + name_len].to_vec()).ok();
+        }
+        q += name_len;
+    }
     None
+}
+
+fn parse_alpn_extension(ext: &[u8]) -> Vec<String> {
+    if ext.len() < 2 {
+        return Vec::new();
+    }
+    let list_len = u16::from_be_bytes([ext[0], ext[1]]) as usize;
+    let end = (2 + list_len).min(ext.len());
+    let mut out = Vec::new();
+    let mut q = 2usize;
+    while q < end {
+        let n = ext[q] as usize;
+        q += 1;
+        if q + n > end {
+            break;
+        }
+        if let Ok(name) = std::str::from_utf8(&ext[q..q + n]) {
+            out.push(name.to_string());
+        }
+        q += n;
+    }
+    out
+}
+
+fn parse_supported_versions(ext: &[u8]) -> Vec<String> {
+    if ext.is_empty() {
+        return Vec::new();
+    }
+    let list_len = ext[0] as usize;
+    let end = (1 + list_len).min(ext.len());
+    let mut out = Vec::new();
+    let mut q = 1usize;
+    while q + 2 <= end {
+        let version = u16::from_be_bytes([ext[q], ext[q + 1]]);
+        if let Some(name) = tls_version_name(version) {
+            out.push(name.to_string());
+        }
+        q += 2;
+    }
+    out
+}
+
+pub fn parse_client_hello_sni(data: &[u8]) -> Option<String> {
+    parse_client_hello(data).and_then(|info| info.sni)
 }
 
 pub fn decode_base64_string(data: &[u8]) -> String {

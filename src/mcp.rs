@@ -31,14 +31,14 @@ pub fn tool_descriptors() -> Vec<Value> {
                     "host": {"type": "string", "description": "Host filter, substring match."},
                     "method": {"type": "string", "description": "HTTP method, exact (GET, POST, ...)."},
                     "status": {"type": "string", "description": "Status filter: 200, 4xx, 5xx, error."},
-                    "protocol": {"type": "string", "description": "http, http2, grpc, websocket, or a custom stored protocol."},
+                    "protocol": {"type": "string", "description": "http, http2, grpc, sse, ndjson, websocket, tls, other, or a custom stored protocol."},
                     "mime": {"type": "string", "description": "Request or response MIME substring, e.g. json or grpc."},
                     "body_contains": {"type": "string", "description": "Substring inside request and/or response body text."},
                     "direction": {"type": "string", "enum": ["both", "request", "response"], "description": "Limit body_contains to one direction."},
                     "since": {"type": "string", "description": "RFC3339 lower bound on started_at."},
                     "until": {"type": "string", "description": "RFC3339 upper bound on started_at."},
                     "has_error": {"type": "boolean", "description": "Only flows with a capture/upstream error."},
-                    "tag": {"type": "string", "description": "Flow tag, e.g. transparent."},
+                    "tag": {"type": "string", "description": "Flow tag: transparent, tls-failed, tls-passthrough, client-rejected-cert."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
                     "offset": {"type": "integer", "minimum": 0, "default": 0},
                     "order": {"type": "string", "enum": ["asc", "desc"], "default": "desc"}
@@ -56,7 +56,7 @@ pub fn tool_descriptors() -> Vec<Value> {
                     "host": {"type": "string", "description": "Optional host substring filter."},
                     "method": {"type": "string", "description": "Optional HTTP method filter."},
                     "status": {"type": "string", "description": "Optional status filter: 200, 4xx, 5xx, error."},
-                    "protocol": {"type": "string", "description": "Optional protocol filter: http, http2, grpc, websocket, other."}
+                    "protocol": {"type": "string", "description": "Optional protocol filter: http, http2, grpc, sse, ndjson, websocket, tls, other."}
                 }
             }),
         ),

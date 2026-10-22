@@ -39,6 +39,62 @@ async fn temp_store() -> (Store, tempfile::TempDir) {
     (store, dir)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_writes_do_not_report_database_locked() {
+    let (store, _dir) = temp_store().await;
+    let mut tasks = Vec::new();
+    for worker in 0..8 {
+        let store = store.clone();
+        tasks.push(tokio::spawn(async move {
+            for index in 0..100 {
+                let id = format!("w{worker:02}-{index:03}");
+                let mut record = flow(index, r#"{"q":"stress"}"#, "stress.example");
+                record.id = id.clone();
+                store.insert(record).await.expect("concurrent insert");
+                store
+                    .update_partial_response(id.clone(), vec![b'x'; 32], 32, false)
+                    .await
+                    .expect("concurrent partial update");
+                store
+                    .update_partial_response(id, vec![b'x'; 64], 64, false)
+                    .await
+                    .expect("concurrent partial update");
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    let stats = store.stats().await.unwrap();
+    assert_eq!(stats.total, 800);
+    assert_eq!(stats.bytes.request, 800 * 14);
+    assert_eq!(stats.bytes.response, 800 * 64);
+    let record = store
+        .get_record("w00-000")
+        .await
+        .unwrap()
+        .expect("flow should exist");
+    assert_eq!(record.response_body_size, 64);
+}
+
+#[tokio::test]
+async fn second_instance_on_the_same_database_is_rejected() {
+    let (store, dir) = temp_store().await;
+    let db = PathBuf::from(dir.path()).join("test.db");
+    let error = Store::open(db.clone())
+        .await
+        .err()
+        .expect("a second instance must not share the database");
+    assert!(
+        error.to_string().contains("already using"),
+        "unexpected error: {error}"
+    );
+    drop(store);
+    // The advisory lock is released with the first store.
+    let reopened = Store::open(db).await.expect("lock should be released");
+    drop(reopened);
+}
+
 #[tokio::test]
 async fn insert_search_get_export_import() {
     let (store, _dir) = temp_store().await;

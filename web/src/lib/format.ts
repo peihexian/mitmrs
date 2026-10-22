@@ -124,6 +124,9 @@ export function protocolLabel(protocol: string): string {
     return 'H1'
   if (value === 'http/3' || value === 'h3') return 'H3'
   if (value === 'websocket' || value === 'ws' || value === 'wss') return 'WS'
+  if (value === 'sse') return 'SSE'
+  if (value === 'ndjson') return 'NDJ'
+  if (value === 'tls') return 'TLS'
   if (!value) return '—'
   return protocol.length > 8 ? protocol.slice(0, 8) : protocol
 }
@@ -135,6 +138,9 @@ export function fullProtocolLabel(protocol: string): string {
   if (value === 'http/1.1' || value === 'http1.1' || value === 'h1')
     return 'HTTP/1.1'
   if (value === 'websocket' || value === 'ws' || value === 'wss') return 'WebSocket'
+  if (value === 'sse') return 'SSE (text/event-stream)'
+  if (value === 'ndjson') return 'NDJSON stream'
+  if (value === 'tls') return 'TLS (not decrypted)'
   if (!value) return 'Unknown'
   return protocol
 }
@@ -406,8 +412,8 @@ export function matchesFilters(flow: FlowSummary, filters: FlowFilters): boolean
     const wanted = filters.protocol.toLowerCase()
     if (wanted === 'other') {
       if (
-        ['http/1.1', 'http/2', 'grpc', 'websocket'].some((item) =>
-          protocol.includes(item),
+        ['http/1.1', 'http/2', 'grpc', 'websocket', 'sse', 'ndjson', 'tls'].some(
+          (item) => protocol.includes(item),
         )
       ) {
         return false

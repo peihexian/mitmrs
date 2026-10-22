@@ -114,6 +114,10 @@ pub struct UpstreamClient {
     http1: Client<Connector, Full<Bytes>>,
     http2: Client<Connector, Full<Bytes>>,
     h2c: Client<Connector, Full<Bytes>>,
+    /// Raw HTTP/1.1 connector kept for protocol upgrades (WebSocket). The
+    /// hyper_util pool cannot hand its connection over, so upgrades get a
+    /// dedicated connection driven by `hyper::client::conn::http1`.
+    upgrade_connector: Connector,
 }
 
 impl UpstreamClient {
@@ -125,6 +129,7 @@ impl UpstreamClient {
         // connection reuse.
         let chain = chain.map(Arc::new);
         let h1_connector = Connector::new(insecure, &[b"http/1.1"], chain.clone(), false)?;
+        let upgrade_connector = h1_connector.clone();
         let h2_connector = Connector::new(insecure, &[b"h2"], chain.clone(), false)?;
         let h2c_connector = Connector::new(insecure, &[b"h2"], chain, true)?;
         let http1 = Client::builder(TokioExecutor::new())
@@ -143,7 +148,19 @@ impl UpstreamClient {
             .pool_idle_timeout(Duration::from_secs(30))
             .pool_timer(hyper_util::rt::TokioTimer::new())
             .build(h2c_connector);
-        Ok(Self { http1, http2, h2c })
+        Ok(Self {
+            http1,
+            http2,
+            h2c,
+            upgrade_connector,
+        })
+    }
+
+    /// Open a dedicated HTTP/1.1 connection for a protocol upgrade. The caller
+    /// owns the connection and must drive `hyper::client::conn::http1` with
+    /// upgrades enabled.
+    pub async fn connect(&self, uri: Uri) -> Result<TokioIo<UpstreamIo>, BoxError> {
+        tower::ServiceExt::oneshot(self.upgrade_connector.clone(), uri).await
     }
 
     pub async fn send(

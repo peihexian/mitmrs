@@ -58,7 +58,10 @@ const protocolOptions = new Set([
   'http/1.1',
   'http/2',
   'grpc',
+  'sse',
+  'ndjson',
   'websocket',
+  'tls',
   'other',
 ])
 const statusOptions = new Set(['', '2xx', '3xx', '4xx', '5xx', 'error'])

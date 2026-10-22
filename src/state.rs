@@ -6,14 +6,41 @@ use crate::transparent::TransparentMap;
 use crate::upstream::UpstreamClient;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// How many certificate-rejection alerts a host may produce before MitmRs stops
+/// intercepting it and tunnels its TLS traffic untouched. A single alert is
+/// enough for clients that pin certificates; keeping the counter lets us log the
+/// decision and still surface every attempt as a flow.
+pub const TLS_PASSTHROUGH_THRESHOLD: u32 = 1;
+
+/// Suppress duplicate TLS-failure rows for the same host and alert within this
+/// window so a retrying client cannot flood the store.
+const TLS_FAILURE_DEDUPE_SECS: i64 = 3;
+
+#[derive(Debug, Clone, Default)]
+pub struct TlsFailureState {
+    pub count: u32,
+    pub last_error: Option<String>,
+    pub last_seen: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TlsFailureNote {
+    pub count: u32,
+    /// The host was (or already is) marked for passthrough.
+    pub learned: bool,
+    /// The same failure was seen moments ago; callers can skip persisting a row.
+    pub duplicate: bool,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ServerEvent {
@@ -46,6 +73,11 @@ pub struct WinDivertRuntime {
     pub state: String,
     pub error: Option<String>,
     pub packets: Arc<AtomicU64>,
+    /// Outbound QUIC (UDP/443) datagrams dropped by `--block-quic`.
+    pub quic_dropped: Arc<AtomicU64>,
+    /// TCP ports currently redirected.
+    pub ports: Vec<u16>,
+    pub block_quic: bool,
     /// Set before the driver is shut down; the worker re-injects any packets
     /// still queued in the driver instead of rewriting them.
     pub stop_requested: Arc<AtomicBool>,
@@ -64,6 +96,9 @@ impl Default for WinDivertRuntime {
             state: "off".into(),
             error: None,
             packets: Arc::new(AtomicU64::new(0)),
+            quic_dropped: Arc::new(AtomicU64::new(0)),
+            ports: vec![80, 443],
+            block_quic: false,
             stop_requested: Arc::new(AtomicBool::new(false)),
             done: Arc::new(tokio::sync::Notify::new()),
             #[cfg(windows)]
@@ -90,6 +125,16 @@ pub struct AppState {
     pub bytes_total: AtomicI64,
     pub capture_state: RwLock<String>,
     pub windivert: RwLock<WinDivertRuntime>,
+    /// TCP ports the transparent gateway redirects (default 80 and 443).
+    pub windivert_ports: RwLock<Vec<u16>>,
+    /// Drop outbound QUIC (UDP/443) so apps fall back to interceptable TCP.
+    pub block_quic: AtomicBool,
+    /// Per-host TLS handshake failures (client rejected our certificate, sent no
+    /// client certificate, ...). Keyed by the SNI/host we signed the leaf for.
+    pub tls_failures: StdMutex<HashMap<String, TlsFailureState>>,
+    /// Hosts we no longer intercept: their TLS bytes are tunneled to the origin
+    /// so pinned clients keep working, and a metadata-only flow is recorded.
+    pub passthrough_hosts: StdRwLock<HashSet<String>>,
     pub web_host: String,
     pub web_port: u16,
     pub insecure_upstream: bool,
@@ -139,6 +184,10 @@ impl AppState {
             bytes_total,
             capture_state: RwLock::new("running".into()),
             windivert: RwLock::new(WinDivertRuntime::default()),
+            windivert_ports: RwLock::new(vec![80, 443]),
+            block_quic: AtomicBool::new(false),
+            tls_failures: StdMutex::new(HashMap::new()),
+            passthrough_hosts: StdRwLock::new(HashSet::new()),
             web_host,
             web_port,
             insecure_upstream,
@@ -199,15 +248,9 @@ impl AppState {
         duration_ms: i64,
         error: Option<String>,
     ) {
-        let old_resp_size = self
-            .store
-            .get_summary(id)
-            .await
-            .ok()
-            .flatten()
-            .map(|r| r.response_size)
-            .unwrap_or(0);
-        if let Err(e) = self
+        // One write returns both the previous size (for byte accounting) and the
+        // updated summary, so the hot path does not open extra read connections.
+        match self
             .store
             .update_response(
                 id.to_string(),
@@ -224,16 +267,207 @@ impl AppState {
             )
             .await
         {
-            tracing::error!("failed to update flow {id}: {e:#}");
-            return;
+            Ok((old_resp_size, summary)) => {
+                let delta = body_size.saturating_sub(old_resp_size) as i64;
+                if delta > 0 {
+                    self.bytes_total.fetch_add(delta, Ordering::Relaxed);
+                }
+                if let Some(summary) = summary {
+                    self.emit("flow", serde_json::to_value(&summary).unwrap_or_default());
+                }
+            }
+            Err(e) => tracing::error!("failed to update flow {id}: {e:#}"),
         }
-        let delta = body_size.saturating_sub(old_resp_size) as i64;
-        if delta > 0 {
-            self.bytes_total.fetch_add(delta, Ordering::Relaxed);
+    }
+
+    /// Persist an in-progress streaming response body. SSE clients keep one
+    /// connection open for minutes, so waiting for the stream to end would leave
+    /// the response invisible (and lose it entirely if the process exits first).
+    pub async fn record_partial_response(
+        &self,
+        id: &str,
+        body: Vec<u8>,
+        body_size: u64,
+        truncated: bool,
+    ) {
+        match self
+            .store
+            .update_partial_response(id.to_string(), body, body_size, truncated)
+            .await
+        {
+            Ok((old_resp_size, summary)) => {
+                if body_size > old_resp_size {
+                    self.bytes_total
+                        .fetch_add((body_size - old_resp_size) as i64, Ordering::Relaxed);
+                }
+                if let Some(summary) = summary {
+                    self.emit("flow", serde_json::to_value(&summary).unwrap_or_default());
+                }
+            }
+            Err(e) => tracing::debug!("failed to flush partial response for {id}: {e:#}"),
         }
-        if let Ok(Some(summary)) = self.store.get_summary(id).await {
-            self.emit("flow", serde_json::to_value(&summary).unwrap_or_default());
+    }
+
+    /// Persist WebSocket frames for both directions. Called periodically while
+    /// the tunnel is open and once more when it closes.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_websocket_bodies(
+        &self,
+        id: &str,
+        request_body: Vec<u8>,
+        request_size: u64,
+        request_truncated: bool,
+        response_body: Vec<u8>,
+        response_size: u64,
+        response_truncated: bool,
+        ended_at: Option<DateTime<Utc>>,
+        duration_ms: Option<i64>,
+        error: Option<String>,
+    ) {
+        match self
+            .store
+            .update_websocket_bodies(
+                id.to_string(),
+                request_body,
+                request_size,
+                request_truncated,
+                response_body,
+                response_size,
+                response_truncated,
+                ended_at,
+                duration_ms,
+                error,
+            )
+            .await
+        {
+            Ok(((old_request, old_response), summary)) => {
+                let delta = request_size.saturating_sub(old_request) as i64
+                    + response_size.saturating_sub(old_response) as i64;
+                if delta > 0 {
+                    self.bytes_total.fetch_add(delta, Ordering::Relaxed);
+                }
+                if let Some(summary) = summary {
+                    self.emit("flow", serde_json::to_value(&summary).unwrap_or_default());
+                }
+            }
+            Err(e) => tracing::debug!("failed to update websocket flow {id}: {e:#}"),
         }
+    }
+
+    /// Update the wire-byte counters of a TLS passthrough tunnel. `ended_at`
+    /// stays `None` while the tunnel is still open.
+    pub async fn record_tunnel_stats(
+        &self,
+        id: &str,
+        request_size: u64,
+        response_size: u64,
+        ended_at: Option<DateTime<Utc>>,
+        duration_ms: Option<i64>,
+    ) {
+        match self
+            .store
+            .update_tunnel_stats(
+                id.to_string(),
+                request_size,
+                response_size,
+                ended_at,
+                duration_ms,
+            )
+            .await
+        {
+            Ok(((old_request, old_response), summary)) => {
+                let delta = request_size.saturating_sub(old_request) as i64
+                    + response_size.saturating_sub(old_response) as i64;
+                if delta > 0 {
+                    self.bytes_total.fetch_add(delta, Ordering::Relaxed);
+                }
+                if let Some(summary) = summary {
+                    self.emit("flow", serde_json::to_value(&summary).unwrap_or_default());
+                }
+            }
+            Err(e) => tracing::debug!("failed to update tunnel flow {id}: {e:#}"),
+        }
+    }
+
+    /// Close a flow that never produced an HTTP response (TLS passthrough
+    /// tunnels) without pretending it failed.
+    pub async fn record_ended(&self, id: &str, ended_at: DateTime<Utc>, duration_ms: i64) {
+        match self
+            .store
+            .update_ended(id.to_string(), ended_at, duration_ms)
+            .await
+        {
+            Ok(Some(summary)) => {
+                self.emit("flow", serde_json::to_value(&summary).unwrap_or_default());
+            }
+            Ok(None) => {}
+            Err(e) => tracing::debug!("failed to close flow {id}: {e:#}"),
+        }
+    }
+
+    /// Record a TLS handshake failure and, for certificate-rejection alerts,
+    /// remember the host so the next connection is tunneled untouched.
+    pub fn note_tls_failure(&self, host: &str, error: &str, learn: bool) -> TlsFailureNote {
+        let key = crate::ca::normalize_host(host);
+        if key.is_empty() {
+            return TlsFailureNote::default();
+        }
+        let now = Utc::now();
+        let (count, duplicate) = {
+            let mut failures = match self.tls_failures.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let entry = failures.entry(key.clone()).or_default();
+            let duplicate = entry
+                .last_seen
+                .map(|seen| (now - seen).num_seconds().abs() < TLS_FAILURE_DEDUPE_SECS)
+                .unwrap_or(false)
+                && entry.last_error.as_deref() == Some(error);
+            entry.count = entry.count.saturating_add(1);
+            entry.last_error = Some(error.to_string());
+            entry.last_seen = Some(now);
+            (entry.count, duplicate)
+        };
+        let learned = learn && count >= TLS_PASSTHROUGH_THRESHOLD;
+        if learned {
+            let mut hosts = match self.passthrough_hosts.write() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            hosts.insert(key);
+        }
+        TlsFailureNote {
+            count,
+            learned,
+            duplicate,
+        }
+    }
+
+    pub fn is_passthrough(&self, host: &str) -> bool {
+        let key = crate::ca::normalize_host(host);
+        if key.is_empty() {
+            return false;
+        }
+        match self.passthrough_hosts.read() {
+            Ok(hosts) => hosts.contains(&key),
+            Err(poisoned) => poisoned.into_inner().contains(&key),
+        }
+    }
+
+    /// Forget every learned passthrough host (restarting the proxy does this
+    /// too). Returns how many entries were dropped.
+    pub fn clear_passthrough(&self) -> usize {
+        let mut hosts = match self.passthrough_hosts.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let count = hosts.len();
+        hosts.clear();
+        if let Ok(mut failures) = self.tls_failures.lock() {
+            failures.clear();
+        }
+        count
     }
 
     pub async fn record_error(
@@ -243,16 +477,16 @@ impl AppState {
         ended_at: DateTime<Utc>,
         duration_ms: i64,
     ) {
-        if let Err(e) = self
+        match self
             .store
             .update_error(id.to_string(), error, ended_at, duration_ms)
             .await
         {
-            tracing::error!("failed to mark flow {id} as error: {e:#}");
-            return;
-        }
-        if let Ok(Some(summary)) = self.store.get_summary(id).await {
-            self.emit("flow", serde_json::to_value(&summary).unwrap_or_default());
+            Ok(Some(summary)) => {
+                self.emit("flow", serde_json::to_value(&summary).unwrap_or_default());
+            }
+            Ok(None) => {}
+            Err(e) => tracing::error!("failed to mark flow {id} as error: {e:#}"),
         }
     }
 
@@ -282,6 +516,9 @@ impl AppState {
                     },
                     error: windivert.error.clone(),
                     packets: windivert.packets.load(Ordering::Relaxed),
+                    quic_dropped: windivert.quic_dropped.load(Ordering::Relaxed),
+                    ports: windivert.ports.clone(),
+                    block_quic: windivert.block_quic,
                 },
             },
             store: StoreStatusView {

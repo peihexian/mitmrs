@@ -273,6 +273,11 @@ pub struct WinDivertStatusView {
     pub state: String,
     pub error: Option<String>,
     pub packets: u64,
+    /// Outbound QUIC (UDP/443) datagrams dropped so apps fall back to TCP.
+    pub quic_dropped: u64,
+    /// TCP ports currently redirected by the transparent gateway.
+    pub ports: Vec<u16>,
+    pub block_quic: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

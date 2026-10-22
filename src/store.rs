@@ -9,11 +9,20 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct Store {
     db_path: Arc<PathBuf>,
+    /// Single connection for every write. SQLite permits exactly one writer, and
+    /// opening a fresh connection per flow made concurrent writes race on the
+    /// `journal_mode=WAL` pragma and on the write lock ("database is locked"
+    /// under load). One long-lived writer behind a mutex removes both.
+    writer: Arc<Mutex<Connection>>,
+    /// Exclusive lock held for the process lifetime. Two MitmRs instances
+    /// sharing one data directory would otherwise fight over the same SQLite
+    /// write lock and WAL bookkeeping.
+    _instance_lock: Arc<std::fs::File>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,12 +148,27 @@ impl ExportFlow {
     }
 }
 
-fn open(path: &Path) -> Result<Connection> {
+/// Writer connection. WAL is configured once here; every other connection must
+/// not touch `journal_mode` (that pragma needs a write lock and was the source
+/// of spurious "database is locked" failures under load).
+fn open_writer(path: &Path) -> Result<Connection> {
     let conn =
         Connection::open(path).with_context(|| format!("open database {}", path.display()))?;
-    conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    conn.busy_timeout(std::time::Duration::from_secs(15))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    conn.pragma_update(None, "journal_size_limit", 64i64 * 1024 * 1024)?;
+    Ok(conn)
+}
+
+/// Reader connection. WAL readers do not block the writer, and `query_only`
+/// makes accidental writes impossible.
+fn open_reader(path: &Path) -> Result<Connection> {
+    let conn =
+        Connection::open(path).with_context(|| format!("open database {}", path.display()))?;
+    conn.busy_timeout(std::time::Duration::from_secs(15))?;
+    conn.pragma_update(None, "query_only", true)?;
     Ok(conn)
 }
 
@@ -238,15 +262,34 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
+        // One instance per data directory: a second process would contend for
+        // the SQLite write lock and WAL files, which shows up as "database is
+        // locked" rather than as an honest startup error.
+        let lock_path = path.with_extension("lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("open instance lock {}", lock_path.display()))?;
+        lock_file.try_lock().map_err(|e| {
+            anyhow!(
+                "another MitmRs instance is already using {}: {e}",
+                path.display()
+            )
+        })?;
         let p = path.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open(&p)?;
+        let writer = tokio::task::spawn_blocking(move || -> Result<Connection> {
+            let conn = open_writer(&p)?;
             init_schema(&conn)?;
-            Ok(())
+            Ok(conn)
         })
         .await??;
         Ok(Self {
             db_path: Arc::new(path),
+            writer: Arc::new(Mutex::new(writer)),
+            _instance_lock: Arc::new(lock_file),
         })
     }
 
@@ -254,10 +297,40 @@ impl Store {
         self.db_path.as_path()
     }
 
-    pub async fn insert(&self, flow: FlowRecord) -> Result<i64> {
+    /// Run a write on the single writer connection.
+    async fn write<T, F>(&self, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        let writer = self.writer.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = match writer.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            f(&mut conn)
+        })
+        .await?
+    }
+
+    /// Run a read on a short-lived query-only connection. WAL snapshots are
+    /// isolated, so this never blocks (or is blocked by) the writer.
+    async fn read<T, F>(&self, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+    {
         let path = self.db_path.clone();
-        tokio::task::spawn_blocking(move || -> Result<i64> {
-            let conn = open(&path)?;
+        tokio::task::spawn_blocking(move || {
+            let conn = open_reader(&path)?;
+            f(&conn)
+        })
+        .await?
+    }
+
+    pub async fn insert(&self, flow: FlowRecord) -> Result<i64> {
+        self.write(move |conn| {
             let request_text = body_text(&flow.request_body);
             let response_text = body_text(&flow.response_body);
             conn.execute(
@@ -305,7 +378,7 @@ impl Store {
             )?;
             Ok(conn.last_insert_rowid())
         })
-        .await?
+        .await
     }
 
     pub async fn update_response(
@@ -321,10 +394,16 @@ impl Store {
         ended_at: DateTime<Utc>,
         duration_ms: i64,
         error: Option<String>,
-    ) -> Result<()> {
-        let path = self.db_path.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open(&path)?;
+    ) -> Result<(u64, Option<FlowSummary>)> {
+        self.write(move |conn| {
+            let old: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(response_body_size,0) FROM flows WHERE id=?1",
+                    params![id.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(0);
             let text = body_text(&body);
             let mime = mime_from_headers(&headers);
             conn.execute(
@@ -332,7 +411,7 @@ impl Store {
                    response_body=?6, response_body_text=?7, response_body_size=?8, response_truncated=?9,
                    ended_at=?10, duration_ms=?11, error=?12, response_mime=?13 WHERE id=?1"#,
                 params![
-                    id,
+                    id.as_str(),
                     status as i64,
                     reason,
                     json_headers(&headers),
@@ -347,9 +426,152 @@ impl Store {
                     mime,
                 ],
             )?;
-            Ok(())
+            let summary = summary_by_id(conn, &id)?;
+            Ok((old as u64, summary))
         })
-        .await?
+        .await
+    }
+
+    /// Flush a streaming body that is still being received. Leaves `ended_at`
+    /// untouched so the flow keeps showing up as in-flight.
+    pub async fn update_partial_response(
+        &self,
+        id: String,
+        body: Vec<u8>,
+        body_size: u64,
+        truncated: bool,
+    ) -> Result<(u64, Option<FlowSummary>)> {
+        self.write(move |conn| {
+            let old: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(response_body_size,0) FROM flows WHERE id=?1",
+                    params![id.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            let text = body_text(&body);
+            conn.execute(
+                r#"UPDATE flows SET response_body=?2, response_body_text=?3,
+                   response_body_size=?4, response_truncated=?5 WHERE id=?1"#,
+                params![id.as_str(), body, text, body_size as i64, truncated as i64],
+            )?;
+            let summary = summary_by_id(conn, &id)?;
+            Ok((old as u64, summary))
+        })
+        .await
+    }
+
+    /// Update both directions of an upgraded (WebSocket) flow. `ended_at` and
+    /// `duration_ms` are optional so the same statement can flush progress
+    /// while the tunnel is still open.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_websocket_bodies(
+        &self,
+        id: String,
+        request_body: Vec<u8>,
+        request_size: u64,
+        request_truncated: bool,
+        response_body: Vec<u8>,
+        response_size: u64,
+        response_truncated: bool,
+        ended_at: Option<DateTime<Utc>>,
+        duration_ms: Option<i64>,
+        error: Option<String>,
+    ) -> Result<((u64, u64), Option<FlowSummary>)> {
+        self.write(move |conn| {
+            let old: (i64, i64) = conn
+                .query_row(
+                    "SELECT COALESCE(request_body_size,0), COALESCE(response_body_size,0) FROM flows WHERE id=?1",
+                    params![id.as_str()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+                .unwrap_or((0, 0));
+            let request_text = body_text(&request_body);
+            let response_text = body_text(&response_body);
+            conn.execute(
+                r#"UPDATE flows SET
+                       request_body=?2, request_body_text=?3, request_body_size=?4, request_truncated=?5,
+                       response_body=?6, response_body_text=?7, response_body_size=?8, response_truncated=?9,
+                       ended_at=COALESCE(?10, ended_at), duration_ms=COALESCE(?11, duration_ms),
+                       error=COALESCE(?12, error)
+                   WHERE id=?1"#,
+                params![
+                    id.as_str(),
+                    request_body,
+                    request_text,
+                    request_size as i64,
+                    request_truncated as i64,
+                    response_body,
+                    response_text,
+                    response_size as i64,
+                    response_truncated as i64,
+                    ended_at.map(|d| d.to_rfc3339()),
+                    duration_ms,
+                    error,
+                ],
+            )?;
+            let summary = summary_by_id(conn, &id)?;
+            Ok(((old.0 as u64, old.1 as u64), summary))
+        })
+        .await
+    }
+
+    /// Update the byte counters of a passthrough tunnel. Called periodically
+    /// while the tunnel is open so undecryptable traffic is still observable.
+    pub async fn update_tunnel_stats(
+        &self,
+        id: String,
+        request_size: u64,
+        response_size: u64,
+        ended_at: Option<DateTime<Utc>>,
+        duration_ms: Option<i64>,
+    ) -> Result<((u64, u64), Option<FlowSummary>)> {
+        self.write(move |conn| {
+            let old: (i64, i64) = conn
+                .query_row(
+                    "SELECT COALESCE(request_body_size,0), COALESCE(response_body_size,0) FROM flows WHERE id=?1",
+                    params![id.as_str()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+                .unwrap_or((0, 0));
+            conn.execute(
+                r#"UPDATE flows SET
+                       request_body_size=?2, response_body_size=?3,
+                       ended_at=COALESCE(?4, ended_at), duration_ms=COALESCE(?5, duration_ms)
+                   WHERE id=?1"#,
+                params![
+                    id.as_str(),
+                    request_size as i64,
+                    response_size as i64,
+                    ended_at.map(|d| d.to_rfc3339()),
+                    duration_ms,
+                ],
+            )?;
+            let summary = summary_by_id(conn, &id)?;
+            Ok(((old.0 as u64, old.1 as u64), summary))
+        })
+        .await
+    }
+
+    /// Mark a flow finished without inventing an HTTP status or body (used for
+    /// passthrough tunnels, which are metadata-only).
+    pub async fn update_ended(
+        &self,
+        id: String,
+        ended_at: DateTime<Utc>,
+        duration_ms: i64,
+    ) -> Result<Option<FlowSummary>> {
+        self.write(move |conn| {
+            conn.execute(
+                "UPDATE flows SET ended_at=?2, duration_ms=?3 WHERE id=?1",
+                params![id.as_str(), ended_at.to_rfc3339(), duration_ms],
+            )?;
+            summary_by_id(conn, &id)
+        })
+        .await
     }
 
     pub async fn update_error(
@@ -358,32 +580,27 @@ impl Store {
         error: String,
         ended_at: DateTime<Utc>,
         duration_ms: i64,
-    ) -> Result<()> {
-        let path = self.db_path.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = open(&path)?;
+    ) -> Result<Option<FlowSummary>> {
+        self.write(move |conn| {
             conn.execute(
                 "UPDATE flows SET error=?2, ended_at=?3, duration_ms=?4 WHERE id=?1",
-                params![id, error, ended_at.to_rfc3339(), duration_ms],
+                params![id.as_str(), error, ended_at.to_rfc3339(), duration_ms],
             )?;
-            Ok(())
+            summary_by_id(conn, &id)
         })
-        .await?
+        .await
     }
 
     pub async fn search(&self, query: &SearchQuery) -> Result<SearchResult> {
-        let path = self.db_path.clone();
         let query = query.clone();
-        tokio::task::spawn_blocking(move || search_blocking(&path, &query)).await?
+        self.read(move |conn| search_blocking(conn, &query)).await
     }
 
     pub async fn all_matching(&self, query: &SearchQuery, max: usize) -> Result<Vec<FlowRecord>> {
         let mut q = query.clone();
         q.limit = Some(max.min(20_000));
         q.offset = Some(0);
-        let path = self.db_path.clone();
-        tokio::task::spawn_blocking(move || -> Result<Vec<FlowRecord>> {
-            let conn = open(&path)?;
+        self.read(move |conn| {
             let (where_sql, params) = build_where(&q);
             let sql = format!(
                 "SELECT * FROM flows {} ORDER BY seq {} LIMIT ? OFFSET ?",
@@ -403,7 +620,7 @@ impl Store {
             }
             Ok(out)
         })
-        .await?
+        .await
     }
 
     pub async fn get(
@@ -412,11 +629,9 @@ impl Store {
         body_mode: &str,
         max_bytes: usize,
     ) -> Result<Option<FlowDetail>> {
-        let path = self.db_path.clone();
         let id = id.to_string();
         let body_mode = body_mode.to_string();
-        tokio::task::spawn_blocking(move || -> Result<Option<FlowDetail>> {
-            let conn = open(&path)?;
+        self.read(move |conn| {
             let rec = conn
                 .query_row(
                     "SELECT * FROM flows WHERE id=?1",
@@ -433,14 +648,12 @@ impl Store {
                 .unwrap_or(0);
             Ok(Some(build_detail(&rec, seq, &body_mode, max_bytes)))
         })
-        .await?
+        .await
     }
 
     pub async fn get_record(&self, id: &str) -> Result<Option<FlowRecord>> {
-        let path = self.db_path.clone();
         let id = id.to_string();
-        tokio::task::spawn_blocking(move || -> Result<Option<FlowRecord>> {
-            let conn = open(&path)?;
+        self.read(move |conn| {
             Ok(conn
                 .query_row(
                     "SELECT * FROM flows WHERE id=?1",
@@ -449,51 +662,34 @@ impl Store {
                 )
                 .optional()?)
         })
-        .await?
+        .await
     }
 
     pub async fn get_summary(&self, id: &str) -> Result<Option<FlowSummary>> {
-        let path = self.db_path.clone();
         let id = id.to_string();
-        tokio::task::spawn_blocking(move || -> Result<Option<FlowSummary>> {
-            let conn = open(&path)?;
-            Ok(conn
-                .query_row(
-                    "SELECT seq,id,started_at,duration_ms,client,scheme,host,port,method,path,http_version,status,request_body_size,response_body_size,request_mime,response_mime,error,protocol,tags FROM flows WHERE id=?1",
-                    params![id],
-                    row_to_summary,
-                )
-                .optional()?)
-        })
-        .await?
+        self.read(move |conn| summary_by_id(conn, &id)).await
     }
 
     pub async fn delete(&self, id: &str) -> Result<bool> {
-        let path = self.db_path.clone();
         let id = id.to_string();
-        tokio::task::spawn_blocking(move || -> Result<bool> {
-            let conn = open(&path)?;
+        self.write(move |conn| {
             let n = conn.execute("DELETE FROM flows WHERE id=?1", params![id])?;
             Ok(n > 0)
         })
-        .await?
+        .await
     }
 
     pub async fn clear(&self) -> Result<usize> {
-        let path = self.db_path.clone();
-        tokio::task::spawn_blocking(move || -> Result<usize> {
-            let conn = open(&path)?;
+        self.write(|conn| {
             let n = conn.execute("DELETE FROM flows", [])?;
             conn.execute("DELETE FROM sqlite_sequence WHERE name='flows'", [])?;
             Ok(n)
         })
-        .await?
+        .await
     }
 
     pub async fn stats(&self) -> Result<Stats> {
-        let path = self.db_path.clone();
-        tokio::task::spawn_blocking(move || -> Result<Stats> {
-            let conn = open(&path)?;
+        self.read(|conn| {
             let total: i64 = conn.query_row("SELECT COUNT(*) FROM flows", [], |r| r.get(0))?;
             let (req_bytes, resp_bytes): (i64, i64) = conn.query_row(
                 "SELECT COALESCE(SUM(request_body_size),0), COALESCE(SUM(response_body_size),0) FROM flows",
@@ -547,7 +743,7 @@ impl Store {
                 last: last.as_deref().map(parse_time),
             })
         })
-        .await?
+        .await
     }
 
     pub async fn export_json(&self, query: &SearchQuery, max: usize) -> Result<String> {
@@ -597,10 +793,9 @@ impl Store {
             ));
         }
         let total = records.len();
-        let path = self.db_path.clone();
-        let imported = tokio::task::spawn_blocking(move || -> Result<usize> {
-            let mut conn = open(&path)?;
-            let tx = conn.transaction()?;
+        let imported = self
+            .write(move |conn| {
+                let tx = conn.transaction()?;
             let mut imported = 0usize;
             for mut flow in records {
                 if tx
@@ -658,7 +853,7 @@ impl Store {
             tx.commit()?;
             Ok(imported)
         })
-        .await??;
+        .await?;
         Ok(ImportResult {
             ok: true,
             imported,
@@ -717,8 +912,22 @@ fn build_where(q: &SearchQuery) -> (String, Vec<SqlValue>) {
             clauses.push("http_version = 'HTTP/2.0'".into());
         } else if p == "http/1.1" || p == "h1" {
             clauses.push("http_version = 'HTTP/1.1'".into());
+        } else if p == "sse" {
+            clauses.push("(protocol = 'sse' OR response_mime = 'text/event-stream')".into());
+        } else if p == "ndjson" {
+            clauses.push(
+                "(protocol = 'ndjson' OR response_mime LIKE '%ndjson%' OR response_mime LIKE '%json-seq%' OR response_mime LIKE '%stream+json%')"
+                    .into(),
+            );
+        } else if p == "tls" {
+            clauses.push(
+                "(protocol = 'tls' OR tags LIKE '%\"tls-failed\"%' OR tags LIKE '%\"tls-passthrough\"%')"
+                    .into(),
+            );
         } else if p == "other" {
-            clauses.push("protocol NOT IN ('http','http2','grpc','websocket')".into());
+            clauses.push(
+                "protocol NOT IN ('http','http2','grpc','websocket','sse','ndjson','tls')".into(),
+            );
         } else {
             clauses.push("protocol = ?".into());
             values.push(SqlValue::Text(p));
@@ -799,8 +1008,7 @@ fn escape_like(s: &str) -> String {
         .replace('_', "\\_")
 }
 
-fn search_blocking(path: &Path, q: &SearchQuery) -> Result<SearchResult> {
-    let conn = open(path)?;
+fn search_blocking(conn: &Connection, q: &SearchQuery) -> Result<SearchResult> {
     let (where_sql, params) = build_where(q);
     let total: i64 = conn.query_row(
         &format!("SELECT COUNT(*) FROM flows {}", where_sql),
@@ -827,6 +1035,18 @@ fn search_blocking(path: &Path, q: &SearchQuery) -> Result<SearchResult> {
         limit: q.normalized_limit(),
         offset: q.normalized_offset(),
     })
+}
+
+const SUMMARY_COLUMNS: &str = "seq,id,started_at,duration_ms,client,scheme,host,port,method,path,http_version,status,request_body_size,response_body_size,request_mime,response_mime,error,protocol,tags";
+
+fn summary_by_id(conn: &Connection, id: &str) -> Result<Option<FlowSummary>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {SUMMARY_COLUMNS} FROM flows WHERE id=?1"),
+            params![id],
+            row_to_summary,
+        )
+        .optional()?)
 }
 
 fn row_to_summary(r: &Row<'_>) -> rusqlite::Result<FlowSummary> {

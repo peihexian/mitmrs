@@ -26,6 +26,10 @@
 ## 功能
 
 - **真正的 HTTPS MITM**：本地 CA + 按 SNI/域名动态签发证书，支持 HTTP/1.1、HTTP/2、gRPC（含 trailers）和 gRPC-Web。
+- **TLS 拦截失败可见**：客户端拒绝本地 CA（信任库未安装、证书固定、mTLS）时记录一条 `protocol=tls`、`tag=tls-failed` 的流量，带上 SNI/ALPN/TLS 版本和客户端 alert；随后自动把该 host 转为透传（`tag=tls-passthrough`），业务不中断。
+- **上游镜像模式**：对“自带信任库、无法 MITM”的客户端，用 `--mirror` 起一个明文反向代理，把它可配置的上游 base URL 指过来，即可零改造抓到大模型 SSE 对话。
+- **WebSocket 抓包**：转发 `101 Switching Protocols` 升级，双向透传字节流并把两个方向的帧写入流量详情（`protocol=websocket`），内置解码器可直接展开 text/binary/ping/pong/close 帧；自动拒绝 `permessage-deflate` 协商以保证帧内容可读。
+- **SSE / 流式响应可见**：`text/event-stream`、NDJSON 等流式响应在连接仍打开时每 500ms 增量落库，列表按 `SSE` 过滤即可看到，不必等流结束。
 - **两种接入方式**
   - 显式代理：默认 `127.0.0.1:8080`，浏览器、curl、Python/Node SDK 直接设置 HTTP/HTTPS 代理。
   - WinDivert 透明重定向（可选，需管理员）：把本机出站 TCP `:80/:443` 重定向到本地代理，客户端无需配置代理。
@@ -35,6 +39,7 @@
 - **生命周期控制**：启动、停止、暂停、恢复、重启、运行时修改代理端口（自动重启监听）、开启/关闭抓包、MCP 同步控制。
 - **链式代理（选配）**：可以把 MitmRs 的上游流量再交给一个 HTTP 代理（如本机 `127.0.0.1:7890`），在设置里勾选并填写地址即可；地址会持久化，下次启动继续使用。
 - **持久化与交换**：SQLite（WAL）保存全部流量；原生 JSON 全量导出/导入（body base64 保真）；HAR 1.2 导出和 HAR 导入。
+- **高并发写入**：SQLite 使用单写连接 + WAL（读取走独立只读连接），高速抓包不会再有 `database is locked`；同一数据目录只允许一个 MitmRs 实例（`mitmrs.lock`），第二个实例启动时会明确报错而不是争抢数据库锁。
 - **单文件分发**：Web 资源嵌入 exe；WinDivert DLL/SYS 由构建脚本放到 exe 同目录。
 
 > HTTP 版本处理：普通 Web 流量即使客户端使用 HTTP/2，上游也优先使用 HTTP/1.1 转发，避免只支持 h1 的网关/源站返回 400 或 502；原生 gRPC 才使用端到端 HTTP/2。因此列表中的 `http_version` 表示客户端到 MitmRs 的协议，不一定等于 MitmRs 到源站的协议。
@@ -44,7 +49,7 @@
 ### 环境
 
 - Windows 10/11 x64
-- Rust 1.88+（MSVC toolchain）
+- Rust 1.89+（MSVC toolchain）
 - Node.js 20+ / pnpm 9+
 - `third_part/WinDivert-2.2.2-A/x64`（仓库已带）
 
@@ -114,6 +119,8 @@ curl.exe --ssl-no-revoke --cacert "$env:LOCALAPPDATA\MitmRs\ca\ca.crt" `
 
 首次运行生成的根 CA **有效期为 10 年（3650 天）**，`not_before` 回拨 1 天以容忍时钟偏差；到期时间在 CA 弹窗和 `/api/status` 的 `ca.not_after` 中可见。删除 `%LOCALAPPDATA%\MitmRs\ca` 后重启会生成新的 10 年 CA（客户端需要重新信任）。
 
+按域名签发的叶子证书有效期为 **397 天**（`not_before` 回拨 1 天），刻意避开部分客户端对超长有效期的拒收（Apple 平台限制 TLS 服务端证书不超过 825 天）。
+
 ### 配置客户端代理
 
 - Windows：设置 → 网络和 Internet → 代理 → 手动设置代理 → `127.0.0.1:8080`。
@@ -140,6 +147,32 @@ curl.exe --ssl-no-revoke --cacert "$env:LOCALAPPDATA\MitmRs\ca\ca.crt" `
 
 示例：浏览器已经指向 MitmRs（`127.0.0.1:8080`），而访问 `google.com` 必须经过本机 `127.0.0.1:7890`，只需要在设置里启用并填写 `127.0.0.1:7890`。
 
+## 上游镜像模式（客户端不信任本地 CA 时）
+
+有些客户端自带信任库：Rust `reqwest` 开 `rustls-tls`（只信任编译进去的 webpki 根）、Node/Python/Java 各读自己的证书库、移动端只信系统根。这类客户端**不会**信任 MitmRs CA，系统证书库装得再对也没用，正向代理只能看到 `tls-failed` + 透传。
+
+如果客户端的上游地址（base URL）可以配置，最干净的办法是**不改客户端、也不做 MITM**：让它用明文 HTTP 连本地镜像，由 MitmRs 完成到真实上游的 TLS：
+
+```powershell
+mitmrs.exe --mirror 127.0.0.1:8899=https://copilot.tencent.com `
+           --mirror 127.0.0.1:8898=https://www.workbuddy.ai
+```
+
+然后把客户端的上游地址改成：
+
+- 国内：`http://127.0.0.1:8899`
+- 国际：`http://127.0.0.1:8898`
+
+流量会按**真实上游**的 host / path 记录，并带 `tag=mirror`；SSE 仍然 500ms 增量落库、解码器可选 `sse`。
+
+说明：
+
+- `--mirror` 可重复，一个监听对应一个上游；只监听你指定的地址（一般 `127.0.0.1`）。
+- 客户端到镜像这一段是明文 HTTP，只建议在本机或可信网络使用。
+- 镜像会自动去掉 `Accept-Encoding`，避免 SSE 被压缩后抓到的内容不可读。
+- 上游必须是显式配置的固定地址，镜像不会变成任意转发的开放代理。
+- 如果客户端只接受 `https://` 的 base，这条方案不适用，只能让它信任本地 CA（或改用进程内 hook）。
+
 ## WinDivert 透明模式
 
 需要 **管理员权限**，并且 `WinDivert.dll`、`WinDivert64.sys` 与 exe 同目录（`scripts/build.ps1` 会自动复制）。
@@ -156,19 +189,37 @@ curl -X POST http://127.0.0.1:8787/api/windivert/start
 
 工作原理：
 
-1. WinDivert 在 NETWORK 层捕获本机出站 IPv4 TCP `:80/:443` 的 SYN。
-2. 为每条连接分配一个本地 relay 源端口（20000–29999），把包的源/目的改写到 `127.0.0.1:<relay>` → `127.0.0.1:<proxy>`，重算校验和并重新注入。
+1. WinDivert 在 NETWORK 层捕获本机出站 TCP 连接（IPv4 + IPv6），默认劫持 `:80/:443`。
+2. 为每条连接分配一个本地 relay 源端口（20000–29999），把包的源/目的改写到 `127.0.0.1:<relay>` / `[::1]:<relay>` → 代理端口，重算校验和并重新注入。
 3. 代理监听器通过 accept 的对端端口查表，恢复原始目的地址；TLS 用 SNI 签证书。
-4. 代理回包从 `127.0.0.1:<proxy>` 发出，WinDivert 捕获后把源改回原始服务器 IP:端口、目的改回客户端，重新注入，客户端完全无感。
+4. 代理回包从 `127.0.0.1:<proxy>` / `[::1]:<proxy>` 发出，WinDivert 捕获后把源改回原始服务器 IP:端口、目的改回客户端，重新注入，客户端完全无感。
 5. 代理自身访问上游的 socket 被绑定到保留源端口段 30000–39999，过滤器排除该段，避免流量再次被重定向形成环。
+
+常用参数：
+
+```powershell
+# 默认：TCP 80/443，IPv4 + IPv6
+mitmrs.exe --windivert
+
+# 额外劫持非标准端口（只应填 HTTP/HTTPS 端口）
+mitmrs.exe --windivert --windivert-ports 80,443,8443,8080
+
+# HTTP/3 客户端回落到 TCP：丢弃本机出站 UDP/443，并计数
+mitmrs.exe --windivert --block-quic
+```
+
+现状里的 `quic_dropped` 计数在 `/api/status` 的 `proxy.windivert` 里，可直接看到被丢弃的 QUIC 报文数。
 
 限制与注意事项：
 
-- 只处理 IPv4 + TCP 的 80/443；IPv6、QUIC/HTTP3、UDP 不处理。
+- 这是**本机版 WireGuard 模式**：不用给应用配代理，任意进程、可用端口都能接管。真正的 WireGuard/TUN 网关还能抓**其他设备**，那需要用户态 TCP/IP 栈和 TUN 驱动，本项目暂未实现。
+- UDP 只处理 `--block-quic` 的丢弃，其余 UDP 不代理；QUIC 本身无法 MITM。
+- `--windivert-ports` 只应填 HTTP/HTTPS 端口：透明模式会按“TLS 或 HTTP”处理，填 SSH/数据库等端口会把连接弄断。
+- `--block-quic` 会影响全机器所有应用的 UDP/443（不是只针对某个进程）。
 - 会接管全机器这些端口的直连流量；与 VPN、其他 WinDivert 工具、网络加速器可能冲突。
 - 开启前请先确认代理已在运行；停止代理会自动停止 WinDivert。
 - 非管理员会返回明确错误。驱动被安全软件拦截时也会报错。
-- 本机 `127.0.0.1` / 回环流量不劫持。
+- 本机 `127.0.0.1` / `[::1]` 回环流量不劫持。
 - 由于 30000–39999 被排除，极少数应用若恰好使用该源端口段会绕过透明抓取（不影响显式代理）。
 
 ## MCP：给 AI 的抓包分析接口
@@ -335,9 +386,10 @@ docs/MCP.md           MCP 工具与 AI 工作流
 ## 已知限制
 
 - 不解析 HTTP/3 / QUIC；WinDivert 模式仅 IPv4 TCP 80/443。
-- WebSocket 升级不转发：HTTP Upgrade 请求会失败；CONNECT 内的非 TLS 流量可裸隧道但不做应用层捕获。
+- WebSocket 仅支持 HTTP/1.1 升级（浏览器经代理时的标准路径）；HTTP/2 的扩展 CONNECT（RFC 8441）暂不支持。为便于查看帧内容，转发时会去掉 `Sec-WebSocket-Extensions`（即不协商 `permessage-deflate`）；二进制帧按原始字节保存。
 - 客户端证书（mTLS）、上游自定义 CA、SOCKS/HTTPS 上游代理未实现；链式代理仅支持 HTTP 下一跳（CONNECT 隧道可达 HTTPS 目标）。
-- 请求体在转发前整体缓冲（上限 128 MB），超大上传会返回 502；响应体是流式转发 + 有上限捕获。
+- 证书固定（pinning）、mTLS、ECH 的客户端无法解密，MitmRs 会自动转为透传，只记录元数据（host/SNI/ALPN/字节数），不记录明文。
+- 请求体在转发前整体缓冲（上限 128 MB），超大上传会返回 502；响应体是流式转发 + 有上限捕获（默认 10 MB）。
 - SQLite 搜索是 `LIKE` 扫描，百万级流量建议先按 host/时间过滤或清理。
 
 ## 系统代理下出现 400/502？
@@ -350,6 +402,63 @@ docs/MCP.md           MCP 工具与 AI 工作流
 
 升级后请 **完全退出旧 MitmRs 实例，再启动新的 `dist\mitmrs.exe`**，并重启使用系统代理的应用/浏览器，让旧连接重新建立。历史列表中的 400/502 是修复前的记录，可用顶部 **Clear** 清空后再复测。
 - 默认只监听 `127.0.0.1`。若改为 `0.0.0.0`，API/MCP 没有鉴权，请自行加防火墙或反向代理。
+
+## 抓不到某个请求？
+
+先按现象分流，再决定要不要动证书：
+
+| 现象 | 大概率原因 | 处理 |
+|---|---|---|
+| 能按 host 找到、状态 200，但 body 空或不完整 | 流式响应还没结束（旧版本只在流结束时落库） | 当前版本每 500ms 增量落库；看 `ended_at` 是否为空即可判断是否仍在流中 |
+| 搜不到该 host，客户端也没有报错 | 流量没进代理：QUIC/HTTP3、非标准端口、回环地址、连接建立早于代理启动 | 用 `--windivert`（本机任意进程）；非标准端口加 `--windivert-ports`；完全重启客户端 |
+| 客户端能用，但列表里几乎没有它的请求 | 应用走了 QUIC/HTTP3（UDP/443） | `--windivert --block-quic` 丢弃 QUIC，迫使它回落到 TCP |
+| 客户端报证书错误，列表里出现 `tag=tls-failed` | 客户端不信任本地 CA、证书固定（pinning）、mTLS、ECH | 见下 |
+| 客户端工作正常，但该 host 只有 `tls-failed` / `tls-passthrough` | 客户端自带信任库（如 Rust `reqwest` 的 `rustls-tls`），系统证书库无效 | 用 `--mirror` 镜像它的可配置上游地址，见上一节 |
+
+握手失败现在会记录成一条 `protocol=tls` 的流量，`error` 字段带客户端返回的 alert：
+
+- `UnknownCA` / `CertificateUnknown` / `BadCertificate` / `UnsupportedCertificate` / `HandshakeFailure`：客户端拒绝了 MitmRs 签发的证书（信任库没装对，或者做了证书固定）。
+- `CertificateRequired`：服务端要求客户端证书（mTLS），当前版本不支持。
+
+对这类 host，MitmRs 会在**下一次连接**自动改为透传：TLS 字节原样转发给源站、不解密，并记录一条 `tag=tls-passthrough` 的元数据流量，保证应用继续可用。停代理再启动（或 restart）会清空已学习的透传 host，便于重新尝试拦截。
+
+如果是信任库问题，要把 CA 装进客户端**真正读取**的存储，而不是只装 Windows 当前用户 Root：
+
+- Node / Electron：`NODE_EXTRA_CA_CERTS=C:\...\ca.crt`（Node ≥22.15 也可 `--use-system-ca`）
+- Rust `reqwest`：`rustls-tls` 特性只信任内置的 webpki 根，**不读 Windows 证书库**，装系统证书无效；需要在代码里 `add_root_certificate()`，或把特性换成 `rustls-tls-native-roots` 再装系统证书
+- Python requests：`REQUESTS_CA_BUNDLE` 或 `SSL_CERT_FILE`
+- Java：`keytool -importcert -cacerts -alias mitmrs -file ca.crt`
+- Firefox、iOS、Android 7+ 有各自的信任入口（Firefox 证书库 / 描述文件+完全信任 / 系统 CA）
+
+证书固定（pinning）无法从代理侧绕过，只能改客户端（Frida / objection / 源码开关），或接受透传并从上游侧、客户端侧日志拿数据。
+
+协议列现在会标出 `SSE`（`text/event-stream`）、`NDJSON` 和 `TLS`；MCP 也可以直接筛：
+`traffic_search {"tag":"tls-failed"}`、`traffic_search {"protocol":"sse"}`。
+
+### 透传能做到什么、不能做到什么
+
+客户端不信任本地 CA 时，MitmRs 会自动把该 host 改为透传（TLS 字节原样转发），并记录：
+
+| 字段 | 来源 |
+|---|---|
+| host / SNI | ClientHello |
+| ALPN / TLS 版本 / 密码套件数 | ClientHello |
+| 客户端地址、开始时间、持续时长 | 连接元数据 |
+| 上行 / 下行字节数 | 隧道实时计数（每 2 秒更新一次） |
+| 拒绝原因 | 客户端 alert（如 `UnknownCA`） |
+
+**透传拿不到明文**：TLS 1.3 的会话密钥只在客户端和源站进程内，代理转发的是密文；客户端拒绝我们的证书，就不会把明文交出来。这是端到端加密的定义，不是实现缺失。
+
+对**任意未知 host**，流程是全自动的：
+
+1. 客户端连接，MitmRs 从 ClientHello 读出 SNI/ALPN；
+2. 尝试 MITM —— 信任本地 CA 的客户端到此为止，明文完整可见；
+3. 被拒绝 → 记录 `tag=tls-failed`（含 alert），并把该 host 标记为透传；
+4. 后续连接走透传，字节数/时长持续记录（`tag=tls-passthrough`，`protocol=tls`）。
+
+因此“不读系统证书库 / 证书固定 / ECH”这类客户端，代理层能自动识别并给出原因和流量画像，但**不会**有明文。想拿到明文只有三条路：让客户端信任本地 CA、让它把上游地址指向 `--mirror`、或者在客户端进程内取密钥/hook（Frida 等，不属于代理能力）。
+
+> ECH 只影响 SNI 可见性和证书名匹配，不改变“客户端是否信任你”这件事；即使剥离 ECH，自带信任库的客户端仍然会拒绝本地 CA。
 
 ## 安全
 

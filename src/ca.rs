@@ -16,6 +16,12 @@ use time::{Duration, OffsetDateTime};
 /// years (3650 days), with `not_before` backdated by one day for clock skew.
 pub const CA_VALIDITY_DAYS: i64 = 3650;
 
+/// Lifetime of the per-host leaf certificates. rcgen's default is `1975-01-01`
+/// to `4096-01-01`, which some strict clients (notably Apple platforms, which
+/// cap TLS server certificates at 825 days) reject outright. Stay well under
+/// the strictest public limit Chrome applies to 398 days.
+pub const LEAF_VALIDITY_DAYS: i64 = 397;
+
 pub struct CertAuthority {
     issuer: Issuer<'static, KeyPair>,
     ca_pem: String,
@@ -176,6 +182,11 @@ impl CertAuthority {
             ExtendedKeyUsagePurpose::ServerAuth,
             ExtendedKeyUsagePurpose::ClientAuth,
         ];
+        // Pin the validity window: rcgen otherwise emits 1975..4096, which
+        // strict clients reject before they ever look at the chain.
+        let now = OffsetDateTime::now_utc();
+        params.not_before = now - Duration::days(1);
+        params.not_after = params.not_before + Duration::days(LEAF_VALIDITY_DAYS);
         let key = KeyPair::generate().context("generate leaf key")?;
         let cert = params
             .signed_by(&key, &self.issuer)

@@ -314,6 +314,11 @@ fn auto_decode(
     options: &Value,
     max: usize,
 ) -> DecodeResult {
+    // Upgraded flows carry raw WebSocket frames (masked client frames included);
+    // the frame decoder knows how to unmask them.
+    if record.protocol.eq_ignore_ascii_case("websocket") || record.status == Some(101) {
+        return decode_websocket(body, max);
+    }
     let ct = content_type.unwrap_or("").to_ascii_lowercase();
     if ct.contains("grpc") {
         return grpc::decode_grpc(

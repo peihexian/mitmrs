@@ -147,6 +147,60 @@ fn parses_tls_client_hello_sni() {
 }
 
 #[test]
+fn parses_client_hello_metadata() {
+    let sni = b"api.example.com";
+    let mut sni_ext = Vec::new();
+    sni_ext.extend_from_slice(&((sni.len() + 3) as u16).to_be_bytes());
+    sni_ext.push(0);
+    sni_ext.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+    sni_ext.extend_from_slice(sni);
+
+    let mut alpn_list = Vec::new();
+    for proto in [b"h2".as_slice(), b"http/1.1".as_slice()] {
+        alpn_list.push(proto.len() as u8);
+        alpn_list.extend_from_slice(proto);
+    }
+    let mut alpn_ext = Vec::new();
+    alpn_ext.extend_from_slice(&(alpn_list.len() as u16).to_be_bytes());
+    alpn_ext.extend_from_slice(&alpn_list);
+
+    let mut versions_ext = vec![4u8];
+    versions_ext.extend_from_slice(&0x0304u16.to_be_bytes());
+    versions_ext.extend_from_slice(&0x0303u16.to_be_bytes());
+
+    let mut ext = Vec::new();
+    for (kind, body) in [(0u16, sni_ext), (16u16, alpn_ext), (43u16, versions_ext)] {
+        ext.extend_from_slice(&kind.to_be_bytes());
+        ext.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        ext.extend_from_slice(&body);
+    }
+
+    let mut body = Vec::new();
+    body.extend_from_slice(&[0x03, 0x03]);
+    body.extend_from_slice(&[0u8; 32]);
+    body.push(0); // session id
+    body.extend_from_slice(&[0x00, 0x06, 0x13, 0x01, 0x13, 0x02, 0x13, 0x03]);
+    body.extend_from_slice(&[0x01, 0x00]); // compression
+    body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+    body.extend_from_slice(&ext);
+    let mut hs = vec![0x01];
+    hs.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+    hs.extend_from_slice(&body);
+
+    let info = decode::formats::parse_client_hello(&hs).expect("client hello should parse");
+    assert_eq!(info.sni.as_deref(), Some("api.example.com"));
+    assert_eq!(info.alpn, vec!["h2".to_string(), "http/1.1".to_string()]);
+    assert_eq!(
+        info.tls_versions,
+        vec!["1.3".to_string(), "1.2".to_string()]
+    );
+    assert_eq!(info.cipher_count, 3);
+    assert_eq!(info.extension_count, 3);
+    assert_eq!(info.alpn_text(), "h2,http/1.1");
+    assert!(decode::formats::parse_client_hello(&hs[..hs.len() - 1]).is_none());
+}
+
+#[test]
 fn decodes_form_and_websocket() {
     let rec = record(b"name=%E5%BC%A0%E4%B8%89&n=42", b"");
     let result = decode::decode_record(&rec, "request", "form", &json!({}), 1_000_000).unwrap();

@@ -95,6 +95,16 @@ Filter summaries. No bodies are returned, which keeps responses small. The same 
 
 Response: `{items, total, limit, offset, next_offset}`. Each item has id, seq, time, method/host/path, status, sizes, protocol, MIME and error.
 
+`protocol` accepts `http/1.1`, `http/2`, `grpc`, `sse`, `ndjson`, `websocket`, `tls` and `other`. `tag` matches exact tag strings; the useful ones for diagnosis are:
+
+| Tag / protocol | Meaning |
+|---|---|
+| `protocol=tls` + `tag=tls-failed` | TLS handshake was rejected (client does not trust the local CA, pinning, mTLS). `error` carries the alert; `request_headers` carry `x-mitmrs-sni`, `x-mitmrs-alpn`, `x-mitmrs-tls-versions`, `x-mitmrs-hello-ciphers`. |
+| `tag=tls-passthrough` | The host was tunneled without decryption after a rejection. Metadata only. |
+| `protocol=sse` | `text/event-stream` response. Streaming bodies are persisted every ~500 ms while the connection stays open. |
+| `protocol=ndjson` | NDJSON / `application/json-seq` / `application/stream+json` stream. |
+| `protocol=websocket` | `101 Switching Protocols` flow. Request body holds client→server frames and response body holds server→client frames (raw wire bytes; the `websocket` decoder unmasks them). |
+
 ### `traffic_get`
 
 ```json
@@ -165,6 +175,8 @@ Returns `{ok, imported, skipped}`.
 ```
 
 Port changes restart the listener and, if enabled, WinDivert. `upstream_proxy_enabled`/`upstream_proxy_url` chain MitmRs upstream traffic through another HTTP proxy; the URL (for example `127.0.0.1:7890` or `http://user:pass@127.0.0.1:7890`) is remembered even after disabling. Returns the full status object.
+
+`stop` (and therefore `restart`) also clears the hosts MitmRs learned to pass through after a certificate rejection, so a restart is the way to retry interception.
 
 ### `ca_certificate`
 

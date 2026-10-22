@@ -6,6 +6,7 @@ pub mod config;
 pub mod control;
 pub mod decode;
 pub mod mcp;
+pub mod mirror;
 pub mod model;
 pub mod proxy;
 pub mod state;

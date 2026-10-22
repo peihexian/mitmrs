@@ -44,7 +44,10 @@ const protocols = [
   { value: 'http/1.1', label: 'HTTP/1.1' },
   { value: 'http/2', label: 'HTTP/2' },
   { value: 'grpc', label: 'gRPC' },
+  { value: 'sse', label: 'SSE' },
+  { value: 'ndjson', label: 'NDJSON' },
   { value: 'websocket', label: 'WebSocket' },
+  { value: 'tls', label: 'TLS' },
   { value: 'other', label: 'Other' },
 ]
 const statusClasses = ['2xx', '3xx', '4xx', '5xx', 'error']

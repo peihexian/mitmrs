@@ -1,6 +1,6 @@
 mod connection;
 mod io;
-mod service;
+pub(crate) mod service;
 
 use crate::state::AppState;
 use anyhow::{anyhow, Context, Result};
@@ -26,11 +26,23 @@ pub async fn start(state: Arc<AppState>) -> Result<()> {
     let actual = listener.local_addr()?;
     tracing::info!("proxy listening on {actual}");
     let cancel = CancellationToken::new();
+    // Transparent IPv6 redirects are rewritten to [::1], so the listener must
+    // also be reachable there. Best effort: a host without IPv6 keeps working.
+    let v6_listener = TcpListener::bind(format!("[::1]:{}", actual.port()))
+        .await
+        .ok();
     let cancel_for_task = cancel.clone();
     let state_for_task = state.clone();
     let task = tokio::spawn(async move {
         accept_loop(state_for_task, listener, cancel_for_task).await;
     });
+    if let Some(v6_listener) = v6_listener {
+        let v6_state = state.clone();
+        let v6_cancel = cancel.clone();
+        tokio::spawn(async move {
+            accept_loop(v6_state, v6_listener, v6_cancel).await;
+        });
+    }
     {
         let mut rt = state.proxy.lock().await;
         rt.state = "running".into();
@@ -73,6 +85,9 @@ pub async fn stop(state: &Arc<AppState>) -> Result<()> {
         rt.state = "stopped".into();
         rt.error = None;
     }
+    // A restart is the user's "try intercepting again" action: forget learned
+    // passthrough hosts so the next connections are MITM'd once more.
+    state.clear_passthrough();
     state.emit(
         "status",
         serde_json::to_value(state.status().await).unwrap_or_default(),
@@ -180,7 +195,7 @@ async fn accept_loop(state: Arc<AppState>, listener: TcpListener, cancel: Cancel
     tracing::info!("proxy accept loop stopped");
 }
 
-struct ConnGuard(Arc<AppState>);
+pub(crate) struct ConnGuard(pub(crate) Arc<AppState>);
 
 impl Drop for ConnGuard {
     fn drop(&mut self) {

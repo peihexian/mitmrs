@@ -36,6 +36,13 @@ struct Cli {
     /// Start WinDivert transparent redirect (requires Administrator + WinDivert DLL/SYS).
     #[arg(long)]
     windivert: bool,
+    /// TCP ports the WinDivert transparent gateway redirects (comma separated,
+    /// default 80,443). Add e.g. 8443,8080 for non-standard AI endpoints.
+    #[arg(long = "windivert-ports", value_name = "PORT[,PORT...]")]
+    windivert_ports: Option<String>,
+    /// Drop outbound QUIC (UDP/443) so applications fall back to interceptable TCP.
+    #[arg(long = "block-quic")]
+    block_quic: bool,
     /// Do not verify upstream TLS certificates (useful for self-signed test servers).
     #[arg(long)]
     insecure_upstream: bool,
@@ -48,6 +55,11 @@ struct Cli {
     /// MCP HTTP endpoint used with --mcp-stdio.
     #[arg(long, default_value = "http://127.0.0.1:8787/mcp")]
     mcp_url: String,
+    /// Plaintext reverse-proxy listener for clients that cannot trust the local
+    /// CA (adds `tag=mirror` flows). Repeatable:
+    /// `--mirror 127.0.0.1:8899=https://copilot.tencent.com`
+    #[arg(long = "mirror", value_name = "LISTEN=UPSTREAM")]
+    mirror: Vec<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -128,10 +140,42 @@ async fn main() -> Result<()> {
     }
 
     #[cfg(windows)]
+    {
+        // Apply the gateway options even without --windivert so a later
+        // /api/windivert/start uses them too.
+        if let Some(raw) = &cli.windivert_ports {
+            match parse_ports(raw) {
+                Ok(ports) => *state.windivert_ports.write().await = ports,
+                Err(e) => tracing::error!("ignoring --windivert-ports {raw}: {e}"),
+            }
+        }
+        if cli.block_quic {
+            state
+                .block_quic
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if cli.windivert {
+            match mitmrs::windivert::start(state.clone()).await {
+                Ok(()) => tracing::info!("WinDivert transparent redirect started"),
+                Err(e) => tracing::error!("WinDivert start failed: {e:#}"),
+            }
+        }
+    }
+    #[cfg(not(windows))]
     if cli.windivert {
-        match mitmrs::windivert::start(state.clone()).await {
-            Ok(()) => tracing::info!("WinDivert transparent redirect started"),
-            Err(e) => tracing::error!("WinDivert start failed: {e:#}"),
+        tracing::warn!("--windivert is only supported on Windows");
+    }
+
+    // Plaintext mirrors for clients that pin/bundle their own TLS roots and
+    // therefore can never trust the MitmRs CA.
+    let mut mirrors: Vec<(std::net::SocketAddr, String)> = Vec::new();
+    for raw in &cli.mirror {
+        match mitmrs::mirror::MirrorSpec::parse(raw) {
+            Ok(spec) => match mitmrs::mirror::start(state.clone(), spec.clone()).await {
+                Ok(addr) => mirrors.push((addr, spec.upstream.to_string())),
+                Err(e) => tracing::error!("mirror start failed for {raw}: {e:#}"),
+            },
+            Err(e) => tracing::error!("{e}"),
         }
     }
 
@@ -153,6 +197,9 @@ async fn main() -> Result<()> {
         println!("  Chain  : http://{}:{}", chain.host, chain.port);
     }
     println!("  MCP    : {mcp_url}");
+    for (addr, upstream) in &mirrors {
+        println!("  Mirror : http://{addr} -> {upstream}");
+    }
     println!("  Data   : {}", data_dir.display());
     println!("  CA     : {}", state.ca.cert_path().display());
     println!();
@@ -224,6 +271,30 @@ async fn main() -> Result<()> {
     }
     tracing::info!("mitmrs stopped");
     Ok(())
+}
+
+#[cfg(windows)]
+fn parse_ports(raw: &str) -> Result<Vec<u16>, String> {
+    let mut ports = Vec::new();
+    for part in raw.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let port: u16 = part
+            .parse()
+            .map_err(|_| format!("invalid TCP port '{part}'"))?;
+        if port == 0 {
+            return Err("port 0 is not valid".into());
+        }
+        if !ports.contains(&port) {
+            ports.push(port);
+        }
+    }
+    if ports.is_empty() {
+        return Err("no ports given".into());
+    }
+    Ok(ports)
 }
 
 fn log_serve_result(result: std::io::Result<()>) {

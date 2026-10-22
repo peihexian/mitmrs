@@ -1,5 +1,7 @@
+use crate::decode::formats::ClientHelloInfo;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
@@ -65,35 +67,83 @@ pub async fn read_first_byte<T: AsyncRead + Unpin>(
     }
 }
 
-pub async fn peek_tls_sni(stream: &TcpStream) -> Option<String> {
-    let mut buf = vec![0u8; 16384];
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+/// Bytes already consumed from the client plus, when parsing succeeded, the
+/// ClientHello metadata. The bytes must be replayed to the TLS acceptor (or to
+/// the upstream server when we fall back to a passthrough tunnel).
+pub struct ClientHelloPeek {
+    pub prefix: Vec<u8>,
+    pub info: Option<ClientHelloInfo>,
+}
+
+const MAX_CLIENT_HELLO: usize = 16 * 1024;
+
+/// Parse a ClientHello out of the first TLS record in `buf`. Returns `None`
+/// while the record (or the handshake message inside it) is still incomplete.
+pub fn parse_tls_record_client_hello(buf: &[u8]) -> Option<ClientHelloInfo> {
+    if buf.len() < 5 || buf[0] != 0x16 {
+        return None;
+    }
+    let record_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
+    if buf.len() < 5 + record_len {
+        return None;
+    }
+    let handshake = &buf[5..5 + record_len];
+    if handshake.len() < 4 || handshake[0] != 1 {
+        return None;
+    }
+    let hs_len =
+        ((handshake[1] as usize) << 16) | ((handshake[2] as usize) << 8) | handshake[3] as usize;
+    if handshake.len() < 4 + hs_len {
+        // A ClientHello fragmented across TLS records is vanishingly rare; give
+        // up rather than buffering the whole handshake.
+        return None;
+    }
+    crate::decode::formats::parse_client_hello(handshake)
+}
+
+/// Read from the client until the ClientHello can be parsed, then return every
+/// byte consumed so the caller can replay it into the TLS acceptor.
+pub async fn read_client_hello<T: AsyncRead + Unpin>(
+    io: &mut T,
+    first: u8,
+    overall: Duration,
+) -> ClientHelloPeek {
+    let mut prefix = vec![first];
+    let deadline = tokio::time::Instant::now() + overall;
     loop {
-        match tokio::time::timeout(std::time::Duration::from_millis(150), stream.peek(&mut buf))
-            .await
-        {
-            Ok(Ok(n)) if n >= 6 => {
-                if buf[0] != 0x16 {
-                    return None;
-                }
-                let rec_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
-                let end = 5 + rec_len;
-                if n >= end {
-                    if let Some(sni) = crate::decode::formats::parse_client_hello_sni(&buf[5..end])
-                    {
-                        return Some(sni);
-                    }
-                }
-                if n >= 10 && buf[5] == 0x01 {
-                    let hs_len =
-                        ((buf[6] as usize) << 16) | ((buf[7] as usize) << 8) | buf[8] as usize;
-                    if n >= 9 + hs_len {
-                        if let Some(sni) =
-                            crate::decode::formats::parse_client_hello_sni(&buf[5..9 + hs_len])
-                        {
-                            return Some(sni);
-                        }
-                    }
+        if let Some(info) = parse_tls_record_client_hello(&prefix) {
+            return ClientHelloPeek {
+                prefix,
+                info: Some(info),
+            };
+        }
+        if prefix.len() >= MAX_CLIENT_HELLO {
+            break;
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let mut chunk = [0u8; 4096];
+        match tokio::time::timeout(left.min(Duration::from_secs(2)), io.read(&mut chunk)).await {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+            Ok(Ok(n)) => prefix.extend_from_slice(&chunk[..n]),
+        }
+    }
+    ClientHelloPeek { prefix, info: None }
+}
+
+/// Peek (without consuming) a ClientHello from a transparently redirected
+/// socket. Used to pick the leaf certificate and to detect learned passthrough
+/// hosts before we answer the handshake.
+pub async fn peek_client_hello(stream: &TcpStream) -> Option<ClientHelloInfo> {
+    let mut buf = vec![0u8; MAX_CLIENT_HELLO];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match tokio::time::timeout(Duration::from_millis(150), stream.peek(&mut buf)).await {
+            Ok(Ok(n)) if n >= 5 => {
+                if let Some(info) = parse_tls_record_client_hello(&buf[..n]) {
+                    return Some(info);
                 }
             }
             Ok(Ok(_)) => {}
