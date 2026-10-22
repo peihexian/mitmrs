@@ -33,6 +33,7 @@
 - **AI 优先的 MCP 服务**：Streamable HTTP JSON-RPC 2.0 端点 `/mcp`，另有 `mcp-stdio` 桥接模式。AI 可以列出最近流量、分页搜索全部结果、过滤、读取上下行 body、切换解码格式、导出/导入、启停代理。
 - **内置解码器**：auto、HTTP 消息、HTTP/2、gRPC/gRPC-Web、Protobuf（无 `.proto`）、JSON、XML/HTML、表单、multipart、SSE、WebSocket 帧、TLS records/SNI、文本（含 GBK 等字符集）、base64、hex、gzip/deflate/brotli/zstd、raw。
 - **生命周期控制**：启动、停止、暂停、恢复、重启、运行时修改代理端口（自动重启监听）、开启/关闭抓包、MCP 同步控制。
+- **链式代理（选配）**：可以把 MitmRs 的上游流量再交给一个 HTTP 代理（如本机 `127.0.0.1:7890`），在设置里勾选并填写地址即可；地址会持久化，下次启动继续使用。
 - **持久化与交换**：SQLite（WAL）保存全部流量；原生 JSON 全量导出/导入（body base64 保真）；HAR 1.2 导出和 HAR 导入。
 - **单文件分发**：Web 资源嵌入 exe；WinDivert DLL/SYS 由构建脚本放到 exe 同目录。
 
@@ -120,6 +121,24 @@ curl.exe --ssl-no-revoke --cacert "$env:LOCALAPPDATA\MitmRs\ca\ca.crt" `
 - Python requests：`proxies={"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}`。
 - Node：`HTTPS_PROXY=http://127.0.0.1:8080`。
 - 不需要代理的地址请加入 `NO_PROXY`（如内网、更新服务）。
+
+### 链式代理（下一跳，选配）
+
+默认情况下 MitmRs 直接连接源站。如果本机需要先经过另一个 HTTP 代理（例如 Clash、公司代理）才能访问目标站点：
+
+1. 打开 Web UI → 顶部 **Settings**。
+2. 勾选 **Chain proxy (next hop)**，填写下一跳地址，例如 `127.0.0.1:7890` 或 `http://127.0.0.1:7890`。
+3. 保存后立即生效，新建立的上游连接会走该代理，无需重启代理或程序。
+
+说明：
+
+- 只有 HTTP 代理（`http://host:port`）受支持；`host:port` 会自动按 `http://` 解析。URL 中带用户名密码时会以 Basic 认证发送 `Proxy-Authorization`。
+- HTTP 请求以 absolute-form 转发给下一跳；HTTPS 通过 `CONNECT` 隧道后由 MitmRs 与源站完成 TLS 握手，因此抓包解码、证书伪造等行为不变。
+- 取消勾选后不再走下一跳，但地址仍会保存在 `config.json` 中，下次打开界面会自动回填。
+- 地址不能指向 MitmRs 自己的监听端口（会形成环）；禁用的非法地址只会被记住，不会影响启动。
+- 也可以让 AI 通过 MCP 设置：`proxy_control {action:"set_config", upstream_proxy_enabled:true, upstream_proxy_url:"127.0.0.1:7890"}`。
+
+示例：浏览器已经指向 MitmRs（`127.0.0.1:8080`），而访问 `google.com` 必须经过本机 `127.0.0.1:7890`，只需要在设置里启用并填写 `127.0.0.1:7890`。
 
 ## WinDivert 透明模式
 
@@ -262,7 +281,7 @@ curl http://127.0.0.1:8787/mcp `
 | GET | `/api/decoders` | 解码器列表 |
 | GET | `/api/events` | SSE：`flow` / `status` / `ping` |
 | POST | `/api/proxy/start\|stop\|pause\|resume\|restart` | 生命周期 |
-| POST | `/api/proxy/config` | `{port,max_body_bytes,capture_enabled}` |
+| POST | `/api/proxy/config` | `{port,max_body_bytes,capture_enabled,upstream_proxy_enabled,upstream_proxy_url}` |
 | POST | `/api/windivert/start\|stop` | 透明模式 |
 | GET | `/api/export?format=json\|har` | 导出下载 |
 | POST | `/api/import` | 导入 JSON/HAR 文本 |
@@ -317,7 +336,7 @@ docs/MCP.md           MCP 工具与 AI 工作流
 
 - 不解析 HTTP/3 / QUIC；WinDivert 模式仅 IPv4 TCP 80/443。
 - WebSocket 升级不转发：HTTP Upgrade 请求会失败；CONNECT 内的非 TLS 流量可裸隧道但不做应用层捕获。
-- 客户端证书（mTLS）、代理链、上游自定义 CA、SOCKS 上游未实现。
+- 客户端证书（mTLS）、上游自定义 CA、SOCKS/HTTPS 上游代理未实现；链式代理仅支持 HTTP 下一跳（CONNECT 隧道可达 HTTPS 目标）。
 - 请求体在转发前整体缓冲（上限 128 MB），超大上传会返回 502；响应体是流式转发 + 有上限捕获。
 - SQLite 搜索是 `LIKE` 扫描，百万级流量建议先按 host/时间过滤或清理。
 

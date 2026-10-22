@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import Modal from './Modal.vue'
 import type { ProxyConfigPatch, Status } from '../types'
@@ -21,6 +21,8 @@ const maxBodyMb = ref(
     : 10,
 )
 const captureEnabled = ref(props.status?.config?.capture_enabled ?? true)
+const chainEnabled = ref(props.status?.config?.upstream_proxy_enabled ?? false)
+const chainUrl = ref(props.status?.config?.upstream_proxy_url ?? '')
 const saving = ref(false)
 const restarting = ref(false)
 const windivertBusy = ref<'start' | 'stop' | null>(null)
@@ -32,6 +34,11 @@ const supportsCaptureToggle = computed(
     props.status?.config != null &&
     props.status.config.capture_enabled !== undefined,
 )
+const supportsChain = computed(
+  () =>
+    props.status?.config != null &&
+    props.status.config.upstream_proxy_enabled !== undefined,
+)
 const state = computed(() => props.status?.proxy.state ?? 'stopped')
 const windivert = computed(() => props.status?.proxy.windivert ?? null)
 const canRestart = computed(
@@ -39,6 +46,26 @@ const canRestart = computed(
 )
 const maxBytes = computed(() =>
   Number.isFinite(maxBodyMb.value) ? Math.round(maxBodyMb.value * 1024 * 1024) : 0,
+)
+
+// The modal can be opened before the first status poll finishes. Hydrate the
+// editable fields once the status arrives so the remembered chain address is
+// shown instead of the empty defaults.
+const configLoaded = ref(props.status != null)
+watch(
+  () => props.status,
+  (next) => {
+    if (!next || configLoaded.value) return
+    configLoaded.value = true
+    port.value = String(next.proxy.port)
+    const bytes = next.config?.max_body_bytes
+    if (bytes != null) {
+      maxBodyMb.value = Math.round((bytes / (1024 * 1024)) * 10) / 10
+    }
+    captureEnabled.value = next.config?.capture_enabled ?? true
+    chainEnabled.value = next.config?.upstream_proxy_enabled ?? false
+    chainUrl.value = next.config?.upstream_proxy_url ?? ''
+  },
 )
 
 function sleep(ms: number): Promise<void> {
@@ -59,6 +86,10 @@ async function saveSettings(): Promise<void> {
     error.value = 'Max captured body must be between 0.1 MB and 2048 MB.'
     return
   }
+  if (supportsChain.value && chainEnabled.value && !chainUrl.value.trim()) {
+    error.value = 'Enter the next-hop proxy address, for example 127.0.0.1:7890.'
+    return
+  }
   const patch: ProxyConfigPatch = {}
   if (parsedPort !== props.status.proxy.port) patch.port = parsedPort
   if (maxBytes.value !== props.status.config.max_body_bytes) {
@@ -70,6 +101,16 @@ async function saveSettings(): Promise<void> {
   ) {
     patch.capture_enabled = captureEnabled.value
   }
+  if (supportsChain.value) {
+    if (
+      chainEnabled.value !== props.status.config.upstream_proxy_enabled
+    ) {
+      patch.upstream_proxy_enabled = chainEnabled.value
+    }
+    if (chainUrl.value.trim() !== (props.status.config.upstream_proxy_url ?? '')) {
+      patch.upstream_proxy_url = chainUrl.value.trim()
+    }
+  }
   if (Object.keys(patch).length === 0) {
     toastInfo('No changes', 'Settings already match the running configuration.')
     return
@@ -79,11 +120,25 @@ async function saveSettings(): Promise<void> {
   try {
     const next = await api.updateConfig(patch)
     emit('updated', next)
+    chainEnabled.value = next.config.upstream_proxy_enabled ?? chainEnabled.value
+    chainUrl.value = next.config.upstream_proxy_url ?? chainUrl.value
     if (patch.port != null) {
       port.value = String(next.proxy.port ?? parsedPort)
       toastSuccess(
         'Proxy port updated',
         `Listener configuration now uses port ${next.proxy.port ?? parsedPort}.`,
+      )
+    } else if (
+      patch.upstream_proxy_enabled !== undefined ||
+      patch.upstream_proxy_url !== undefined
+    ) {
+      toastSuccess(
+        next.config.upstream_proxy_enabled
+          ? 'Chain proxy enabled'
+          : 'Chain proxy disabled',
+        next.config.upstream_proxy_enabled && next.config.upstream_proxy_url
+          ? `New upstream connections go through ${next.config.upstream_proxy_url}.`
+          : 'New upstream connections go directly to the target.',
       )
     } else {
       toastSuccess('Settings applied')
@@ -249,6 +304,65 @@ onBeforeUnmount(() => {
           Larger bodies are stored truncated. Changes affect new captures;
           existing flow data is unchanged.
         </p>
+      </div>
+
+      <div
+        v-if="supportsChain"
+        class="rounded-md border border-ink-700/70 bg-ink-950/25 px-3 py-2.5"
+      >
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-1.5">
+              <AppIcon name="link" :size="12" class="text-mist-600" />
+              <span class="text-[10.5px] font-medium text-mist-300">Chain proxy (next hop)</span>
+              <span
+                v-if="chainEnabled"
+                class="badge border-teal-500/25 bg-teal-500/[0.06] text-teal-300"
+              >
+                active
+              </span>
+            </div>
+            <p class="mt-0.5 text-[9px] leading-relaxed text-mist-600">
+              Route MitmRs upstream traffic through another HTTP proxy, for
+              example <span class="mono text-mist-500">127.0.0.1:7890</span>.
+            </p>
+          </div>
+          <button
+            class="relative h-5 w-9 shrink-0 rounded-full transition"
+            :class="chainEnabled ? 'bg-accent-500/80' : 'bg-ink-650'"
+            type="button"
+            role="switch"
+            :aria-checked="chainEnabled"
+            aria-label="Chain proxy enabled"
+            @click="chainEnabled = !chainEnabled"
+          >
+            <span
+              class="absolute top-1 h-3 w-3 rounded-full bg-white shadow transition-all"
+              :class="chainEnabled ? 'left-[21px]' : 'left-1'"
+            />
+          </button>
+        </div>
+        <div class="mt-2">
+          <label class="field-label" for="settings-chain-url">
+            <span>Next-hop address</span>
+            <span class="normal-case tracking-normal text-mist-700">host:port</span>
+          </label>
+          <input
+            id="settings-chain-url"
+            v-model="chainUrl"
+            type="text"
+            class="field field-mono"
+            :class="chainEnabled ? '' : 'opacity-60'"
+            :disabled="saving || !chainEnabled"
+            placeholder="127.0.0.1:7890"
+            @keydown.enter.prevent="saveSettings"
+          />
+          <p class="mt-1 text-[9px] leading-snug text-mist-700">
+            The address is remembered even while chaining is off. Only HTTP
+            proxies are supported; credentials in the URL are sent as Basic
+            auth. Applies to new upstream connections without a restart.
+          </p>
+        </div>
       </div>
 
       <div

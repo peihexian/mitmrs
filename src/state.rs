@@ -7,7 +7,7 @@ use crate::upstream::UpstreamClient;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -46,6 +46,11 @@ pub struct WinDivertRuntime {
     pub state: String,
     pub error: Option<String>,
     pub packets: Arc<AtomicU64>,
+    /// Set before the driver is shut down; the worker re-injects any packets
+    /// still queued in the driver instead of rewriting them.
+    pub stop_requested: Arc<AtomicBool>,
+    /// Notified once the worker has closed the WinDivert handle.
+    pub done: Arc<tokio::sync::Notify>,
     #[cfg(windows)]
     pub shutdown: Arc<std::sync::Mutex<Option<windivert::prelude::ShutdownHandle>>>,
     #[cfg(windows)]
@@ -59,6 +64,8 @@ impl Default for WinDivertRuntime {
             state: "off".into(),
             error: None,
             packets: Arc::new(AtomicU64::new(0)),
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            done: Arc::new(tokio::sync::Notify::new()),
             #[cfg(windows)]
             shutdown: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(windows)]
@@ -70,7 +77,7 @@ impl Default for WinDivertRuntime {
 pub struct AppState {
     pub store: Store,
     pub ca: Arc<CertAuthority>,
-    pub upstream: UpstreamClient,
+    pub upstream: RwLock<UpstreamClient>,
     pub config: RwLock<RuntimeConfig>,
     pub started_at: DateTime<Utc>,
     pub data_dir: PathBuf,
@@ -87,6 +94,9 @@ pub struct AppState {
     pub web_port: u16,
     pub insecure_upstream: bool,
     pub transparent: Arc<TransparentMap>,
+    /// Process-wide shutdown signal. Cancelled on Ctrl+C so long-lived
+    /// responses (SSE) stop streaming and the HTTP server can drain.
+    pub shutdown: CancellationToken,
 }
 
 impl AppState {
@@ -116,7 +126,7 @@ impl AppState {
         Arc::new(Self {
             store,
             ca,
-            upstream,
+            upstream: RwLock::new(upstream),
             config: RwLock::new(config),
             started_at: Utc::now(),
             data_dir,
@@ -133,6 +143,7 @@ impl AppState {
             web_port,
             insecure_upstream,
             transparent: Arc::new(TransparentMap::default()),
+            shutdown: CancellationToken::new(),
         })
     }
 
@@ -297,6 +308,8 @@ impl AppState {
             config: RuntimeConfigView {
                 max_body_bytes: config.max_body_bytes,
                 capture_enabled: config.capture_enabled,
+                upstream_proxy_enabled: config.upstream_proxy_enabled,
+                upstream_proxy_url: config.upstream_proxy_url.clone(),
             },
         }
     }
@@ -308,6 +321,8 @@ impl AppState {
             proxy_port: c.proxy_port,
             max_body_bytes: c.max_body_bytes,
             capture_enabled: c.capture_enabled,
+            upstream_proxy_enabled: c.upstream_proxy_enabled,
+            upstream_proxy_url: c.upstream_proxy_url.clone(),
         }
     }
 

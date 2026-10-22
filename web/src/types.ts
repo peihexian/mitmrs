@@ -43,6 +43,8 @@ export interface McpStatus {
 export interface BackendConfig {
   max_body_bytes: number
   capture_enabled: boolean
+  upstream_proxy_enabled?: boolean
+  upstream_proxy_url?: string
 }
 
 export interface StoreStatus {
@@ -201,6 +203,8 @@ export interface ProxyConfigPatch {
   port?: number
   max_body_bytes?: number
   capture_enabled?: boolean
+  upstream_proxy_enabled?: boolean
+  upstream_proxy_url?: string
 }
 
 export type ProxyAction = 'start' | 'stop' | 'pause' | 'resume'

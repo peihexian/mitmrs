@@ -303,6 +303,8 @@ pub struct McpStatusView {
 pub struct RuntimeConfigView {
     pub max_body_bytes: u64,
     pub capture_enabled: bool,
+    pub upstream_proxy_enabled: bool,
+    pub upstream_proxy_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,6 +323,8 @@ pub struct ConfigPatch {
     pub port: Option<u16>,
     pub max_body_bytes: Option<u64>,
     pub capture_enabled: Option<bool>,
+    pub upstream_proxy_enabled: Option<bool>,
+    pub upstream_proxy_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

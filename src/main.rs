@@ -5,6 +5,7 @@ use mitmrs::config::{default_data_dir, load_file_config};
 use mitmrs::state::AppState;
 use mitmrs::store::Store;
 use mitmrs::upstream::UpstreamClient;
+use std::future::IntoFuture;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -98,7 +99,14 @@ async fn main() -> Result<()> {
     let db_path = data_dir.join("mitmrs.db");
     let store = Store::open(db_path.clone()).await?;
     let ca = Arc::new(CertAuthority::load_or_create(data_dir.join("ca")).await?);
-    let upstream = UpstreamClient::new(cli.insecure_upstream)?;
+    let startup_chain = match runtime_cfg.upstream_chain() {
+        Ok(chain) => chain,
+        Err(e) => {
+            tracing::warn!("ignoring saved upstream chain proxy: {e}");
+            None
+        }
+    };
+    let upstream = UpstreamClient::new(cli.insecure_upstream, startup_chain.clone())?;
     let state = AppState::new(
         store,
         ca,
@@ -141,6 +149,9 @@ async fn main() -> Result<()> {
         let cfg = state.config.read().await;
         println!("  Proxy  : http://{}:{}", cfg.proxy_host, cfg.proxy_port);
     }
+    if let Some(chain) = &startup_chain {
+        println!("  Chain  : http://{}:{}", chain.host, chain.port);
+    }
     println!("  MCP    : {mcp_url}");
     println!("  Data   : {}", data_dir.display());
     println!("  CA     : {}", state.ca.cert_path().display());
@@ -151,18 +162,75 @@ async fn main() -> Result<()> {
     }
 
     let serve_state = state.clone();
-    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+    let shutdown_token = state.shutdown.clone();
+    tokio::spawn(async move {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::warn!("failed to listen for Ctrl+C: {e}");
+            return;
+        }
+        tracing::info!("shutting down (press Ctrl+C again to force quit)");
+        shutdown_token.cancel();
+        // A second Ctrl+C must always be able to kill the process, even if some
+        // subsystem (WinDivert, a stuck connection) never finishes draining.
         let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("shutting down");
+        tracing::warn!("second Ctrl+C received, forcing exit");
+        std::process::exit(130);
     });
-    if let Err(e) = server.await {
-        tracing::error!("web server error: {e:#}");
+
+    let server = axum::serve(listener, app).with_graceful_shutdown({
+        let shutdown = state.shutdown.clone();
+        async move { shutdown.cancelled().await }
+    });
+    // Graceful shutdown waits for in-flight requests. Long-lived SSE streams are
+    // ended by the `events` handler; the timeout is a safety net so that one
+    // stuck connection can never keep the process alive.
+    let mut server = std::pin::pin!(server.into_future());
+    let shutdown = state.shutdown.clone();
+    let mut server_done = false;
+    tokio::select! {
+        res = &mut server => {
+            log_serve_result(res);
+            server_done = true;
+        }
+        _ = shutdown.cancelled() => {}
+    }
+    if !server_done {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut server).await {
+            Ok(res) => log_serve_result(res),
+            Err(_) => tracing::warn!("web server did not drain within 5s; continuing shutdown"),
+        }
     }
 
     #[cfg(windows)]
-    let _ = mitmrs::windivert::stop(&serve_state).await;
-    let _ = mitmrs::proxy::stop(&serve_state).await;
+    {
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            mitmrs::windivert::stop(&serve_state),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!("WinDivert shutdown did not finish within 5s");
+        }
+    }
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        mitmrs::proxy::stop(&serve_state),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("proxy shutdown did not finish within 5s");
+    }
+    tracing::info!("mitmrs stopped");
     Ok(())
+}
+
+fn log_serve_result(result: std::io::Result<()>) {
+    match result {
+        Ok(()) => tracing::info!("web server stopped"),
+        Err(e) => tracing::error!("web server error: {e:#}"),
+    }
 }
 
 fn open_browser(url: &str) {

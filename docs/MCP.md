@@ -160,9 +160,11 @@ Returns `{ok, imported, skipped}`.
 {"action":"start"}
 {"action":"restart"}
 {"action":"set_config","port":8888,"max_body_bytes":5242880,"capture_enabled":true}
+{"action":"set_config","upstream_proxy_enabled":true,"upstream_proxy_url":"127.0.0.1:7890"}
+{"action":"set_config","upstream_proxy_enabled":false}
 ```
 
-Port changes restart the listener and, if enabled, WinDivert. Returns the full status object.
+Port changes restart the listener and, if enabled, WinDivert. `upstream_proxy_enabled`/`upstream_proxy_url` chain MitmRs upstream traffic through another HTTP proxy; the URL (for example `127.0.0.1:7890` or `http://user:pass@127.0.0.1:7890`) is remembered even after disabling. Returns the full status object.
 
 ### `ca_certificate`
 

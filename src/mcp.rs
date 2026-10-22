@@ -156,14 +156,16 @@ pub fn tool_descriptors() -> Vec<Value> {
         ),
         tool(
             "proxy_control",
-            "Read or change proxy lifecycle: status, start, stop, pause, resume, restart, set_config. Can also set proxy_port, max_body_bytes and capture_enabled. Pausing rejects new requests but keeps captured data.",
+            "Read or change proxy lifecycle: status, start, stop, pause, resume, restart, set_config. Can also set proxy_port, max_body_bytes, capture_enabled, and the optional upstream chain proxy (upstream_proxy_enabled/upstream_proxy_url). Pausing rejects new requests but keeps captured data.",
             json!({
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["status", "start", "stop", "pause", "resume", "restart", "set_config"], "default": "status"},
                     "port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "New proxy port; restarts the listener if running."},
                     "max_body_bytes": {"type": "integer", "minimum": 65536, "maximum": 268435456},
-                    "capture_enabled": {"type": "boolean"}
+                    "capture_enabled": {"type": "boolean"},
+                    "upstream_proxy_enabled": {"type": "boolean", "description": "Route MitmRs upstream traffic through another HTTP proxy (next hop)."},
+                    "upstream_proxy_url": {"type": "string", "description": "Next-hop proxy address such as 127.0.0.1:7890 or http://127.0.0.1:7890. Only http:// proxies are supported; basic auth in the URL is accepted."}
                 }
             }),
         ),
@@ -576,11 +578,18 @@ fn tool_proxy(state: &Arc<AppState>, args: &Value) -> Result<Value, String> {
     let patch = if args.get("port").is_some()
         || args.get("max_body_bytes").is_some()
         || args.get("capture_enabled").is_some()
+        || args.get("upstream_proxy_enabled").is_some()
+        || args.get("upstream_proxy_url").is_some()
     {
         Some(ConfigPatch {
             port: args.get("port").and_then(|v| v.as_u64()).map(|v| v as u16),
             max_body_bytes: args.get("max_body_bytes").and_then(|v| v.as_u64()),
             capture_enabled: args.get("capture_enabled").and_then(|v| v.as_bool()),
+            upstream_proxy_enabled: args.get("upstream_proxy_enabled").and_then(|v| v.as_bool()),
+            upstream_proxy_url: args
+                .get("upstream_proxy_url")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
         })
     } else {
         None
@@ -615,6 +624,13 @@ fn help_payload(state: &Arc<AppState>) -> Value {
         "endpoint": format!("http://{}:{}/mcp", state.web_host, state.web_port),
         "transport": "Streamable HTTP JSON-RPC 2.0",
         "proxy": format!("{}:{}", state.config.try_read().map(|c| c.proxy_host.clone()).unwrap_or_else(|_| "127.0.0.1".into()), state.config.try_read().map(|c| c.proxy_port).unwrap_or(8080)),
+        "upstream_proxy": state.config.try_read().ok().and_then(|c| {
+            if c.upstream_proxy_enabled && !c.upstream_proxy_url.is_empty() {
+                Some(c.upstream_proxy_url.clone())
+            } else {
+                None
+            }
+        }),
         "workflow": [
             "1. ca_certificate -> install/trust the CA for HTTPS.",
             "2. proxy_control action=start (the proxy auto-starts on launch).",
@@ -628,7 +644,8 @@ fn help_payload(state: &Arc<AppState>) -> Value {
             "gRPC bodies are length-prefixed; use format=grpc, then read frames[].protobuf.",
             "Use format=protobuf for raw schema-less protobuf.",
             "Use format=base64 when you need exact bytes for an external tool.",
-            "body_contains only searches captured/truncated text; check max_body_bytes if results are missing."
+            "body_contains only searches captured/truncated text; check max_body_bytes if results are missing.",
+            "To chain through a local proxy, call proxy_control with upstream_proxy_enabled=true and upstream_proxy_url like 127.0.0.1:7890; the address is remembered while chaining is disabled."
         ]
     })
 }

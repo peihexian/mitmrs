@@ -33,6 +33,18 @@ HTTPS interception requires the client to trust the local CA. Certificates are c
 
 Ordinary web traffic is forwarded to upstream as HTTP/1.1 even when the downstream client uses HTTP/2; hyper translates the response back to h2. This avoids gateways (for example APISIX) rejecting h2-translated h1 requests and supports origins that only speak h1. Native gRPC is the exception: it requires end-to-end HTTP/2, with a separate h2 client (and an h2c client for cleartext prior-knowledge gRPC). gRPC requires `te: trailers`, so that one hop-by-hop header is intentionally preserved. Separate connection pools per protocol prevent cross-version reuse.
 
+## Upstream chain proxy
+
+`upstream_proxy_enabled` and `upstream_proxy_url` are persisted in `config.json`; the address survives disabling and process restarts so the UI can remember the last value.
+
+When chaining is enabled, every upstream connection is established through the configured HTTP proxy (`http://host:port`, optional Basic credentials in the URL):
+
+- Plain HTTP requests are sent in absolute-form. The connector reports `Connected::proxy(true)` so hyper rewrites the request target, and `Proxy-Authorization` is added when the URL carries credentials.
+- HTTPS uses `CONNECT host:port` against the next hop, then runs the normal TLS client handshake (with ALPN) inside the tunnel. Native gRPC over cleartext (h2c) also uses the tunnel before speaking h2.
+- Raw CONNECT tunnels for non-TLS targets are opened through the next hop as well.
+
+A config change reparses the address and swaps the whole `UpstreamClient`; requests already in flight keep using the pool they started on. A loopback chain that points at MitmRs's own listener is rejected to avoid a loop. Only HTTP proxies are supported; SOCKS and TLS-to-proxy are out of scope.
+
 ## Transparent WinDivert redirect
 
 WinDivert sits at `WINDIVERT_LAYER_NETWORK`. The filter is:
@@ -108,6 +120,8 @@ Vite builds `web/dist`. `rust-embed` includes the folder at compile time. `api::
 ## Lifecycle
 
 `ProxyRuntime` owns the listener task, cancellation token and state. Stop cancels the token and aborts the accept task; its `JoinSet` drops all connection tasks, which close sockets. Start binds before flipping state to `running`, so a port conflict leaves an actionable `error` state. Pause keeps connections but rejects new requests with 503. Port changes persist to `config.json` and restart the listener. WinDivert is stopped with the proxy and restarted after a port change if it was active.
+
+Process shutdown is driven by `AppState::shutdown`. The first Ctrl+C cancels it: the SSE `/api/events` stream ends so the request is no longer held open, the axum server drains with a 5s cap, then WinDivert and the proxy listener are stopped (each capped at 5s). A second Ctrl+C exits immediately. WinDivert teardown issues `WinDivertShutdown(RECV)` instead of closing the handle from another thread: that stops new packets from being queued while leaving `send` usable, so the worker re-injects whatever is already queued and then closes the handle and signals completion. The worker is never joined unboundedly, so a wedged driver call cannot delay process exit.
 
 ## Deliberate non-goals
 

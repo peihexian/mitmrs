@@ -7,6 +7,12 @@ pub struct FileConfig {
     pub proxy_port: u16,
     pub max_body_bytes: u64,
     pub capture_enabled: bool,
+    /// Optional next-hop HTTP proxy. Persisted even while disabled so the UI
+    /// can remember the last address the user typed.
+    #[serde(default)]
+    pub upstream_proxy_enabled: bool,
+    #[serde(default)]
+    pub upstream_proxy_url: String,
 }
 
 impl Default for FileConfig {
@@ -16,6 +22,8 @@ impl Default for FileConfig {
             proxy_port: 8080,
             max_body_bytes: 10 * 1024 * 1024,
             capture_enabled: true,
+            upstream_proxy_enabled: false,
+            upstream_proxy_url: String::new(),
         }
     }
 }
@@ -26,6 +34,8 @@ pub struct RuntimeConfig {
     pub proxy_port: u16,
     pub max_body_bytes: u64,
     pub capture_enabled: bool,
+    pub upstream_proxy_enabled: bool,
+    pub upstream_proxy_url: String,
 }
 
 impl From<&FileConfig> for RuntimeConfig {
@@ -35,7 +45,21 @@ impl From<&FileConfig> for RuntimeConfig {
             proxy_port: c.proxy_port,
             max_body_bytes: c.max_body_bytes,
             capture_enabled: c.capture_enabled,
+            upstream_proxy_enabled: c.upstream_proxy_enabled,
+            upstream_proxy_url: c.upstream_proxy_url.clone(),
         }
+    }
+}
+
+impl RuntimeConfig {
+    /// Parse the optional next-hop proxy. The address is parsed only while the
+    /// user has chaining enabled, so a remembered-but-disabled address never
+    /// blocks unrelated configuration changes.
+    pub fn upstream_chain(&self) -> Result<Option<crate::upstream::ProxyChain>, String> {
+        if !self.upstream_proxy_enabled {
+            return Ok(None);
+        }
+        crate::upstream::ProxyChain::parse(&self.upstream_proxy_url).map(Some)
     }
 }
 

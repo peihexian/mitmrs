@@ -56,6 +56,24 @@ const connectionLabel = computed(() => {
       <AppIcon name="plug" :size="10" class="text-mist-700" />
       <span class="font-mono text-[9px] text-mist-500">{{ proxyEndpoint }}</span>
     </div>
+    <template
+      v-if="
+        status?.config?.upstream_proxy_enabled &&
+        status.config.upstream_proxy_url
+      "
+    >
+      <span class="h-3 w-px shrink-0 bg-ink-700/70" />
+      <div
+        class="flex shrink-0 items-center gap-1.5 px-2.5"
+        :title="`Upstream chain proxy ${status.config.upstream_proxy_url}`"
+      >
+        <AppIcon name="link" :size="9" class="text-teal-500/70" />
+        <span class="text-[9px] text-mist-600">chain</span>
+        <span class="mono max-w-[160px] truncate text-[8.5px] text-mist-700">
+          {{ status.config.upstream_proxy_url }}
+        </span>
+      </div>
+    </template>
     <span class="h-3 w-px shrink-0 bg-ink-700/70" />
     <button
       class="flex shrink-0 items-center gap-1.5 px-2.5 py-1 transition hover:text-accent-300"

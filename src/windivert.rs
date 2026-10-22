@@ -13,7 +13,7 @@ use crate::state::AppState;
 use crate::transparent::TransparentTarget;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use windivert::prelude::*;
@@ -23,6 +23,10 @@ const RELAY_PORT_MAX: u16 = 29999;
 const UPSTREAM_PORT_MIN: u16 = 30000;
 const UPSTREAM_PORT_MAX: u16 = 39999;
 const NAT_TTL: Duration = Duration::from_secs(300);
+/// How long `stop` waits for the worker to drain the driver queue and close the
+/// WinDivert handle. The queue is small and the drain only re-injects packets,
+/// so this is a safety net, not an expected wait.
+const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FlowKey {
@@ -350,6 +354,10 @@ pub async fn start(state: Arc<AppState>) -> anyhow::Result<()> {
     let filter_for_log = filter.clone();
     let shutdown_slot: Arc<Mutex<Option<ShutdownHandle>>> = Arc::new(Mutex::new(None));
     let shutdown_for_thread = shutdown_slot.clone();
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let stop_for_thread = stop_requested.clone();
+    let done = Arc::new(tokio::sync::Notify::new());
+    let done_for_thread = done.clone();
     let thread = std::thread::Builder::new()
         .name("mitmrs-windivert".into())
         .spawn(move || {
@@ -357,6 +365,7 @@ pub async fn start(state: Arc<AppState>) -> anyhow::Result<()> {
                 Ok(d) => d,
                 Err(e) => {
                     let _ = tx.send(Err(format!("{e}")));
+                    done_for_thread.notify_one();
                     return;
                 }
             };
@@ -369,6 +378,16 @@ pub async fn start(state: Arc<AppState>) -> anyhow::Result<()> {
             loop {
                 match divert.recv(&mut buf) {
                     Ok(mut packet) => {
+                        if stop_for_thread.load(Ordering::SeqCst) {
+                            // Shutdown in progress: the driver may still hand us
+                            // packets queued before WinDivertShutdown(). Put them
+                            // back untouched so stopping does not black-hole
+                            // traffic that was already intercepted.
+                            if let Err(e) = divert.send(&packet) {
+                                tracing::debug!("windivert drain send failed: {e}");
+                            }
+                            continue;
+                        }
                         packets.fetch_add(1, Ordering::Relaxed);
                         process_packet(
                             &mut packet,
@@ -397,7 +416,12 @@ pub async fn start(state: Arc<AppState>) -> anyhow::Result<()> {
                     }
                 }
             }
+            // Closing the handle detaches the WFP filter. Dropping the last
+            // packet buffer before this point keeps the close path free of
+            // pending injected data.
+            drop(divert);
             tracing::info!("windivert packet loop stopped");
+            done_for_thread.notify_one();
         })?;
 
     match rx.await {
@@ -424,6 +448,8 @@ pub async fn start(state: Arc<AppState>) -> anyhow::Result<()> {
     if let Ok(mut slot) = rt.shutdown.lock() {
         *slot = shutdown;
     }
+    rt.stop_requested = stop_requested;
+    rt.done = done;
     rt.thread = Some(thread);
     drop(rt);
     state.emit(
@@ -435,24 +461,43 @@ pub async fn start(state: Arc<AppState>) -> anyhow::Result<()> {
 
 #[cfg(windows)]
 pub async fn stop(state: &Arc<AppState>) -> anyhow::Result<()> {
-    // WinDivert's handle is owned by the worker; dropping the process handle is
-    // the only reliable cross-thread stop without exposing the handle. We signal
-    // shutdown via the shared token installed by `start`.
-    let mut rt = state.windivert.write().await;
-    if !rt.enabled {
-        return Ok(());
-    }
-    rt.state = "stopping".into();
-    if let Ok(mut slot) = rt.shutdown.lock() {
-        if let Some(shutdown) = slot.take() {
-            let _ = shutdown.shutdown();
+    // The WinDivert handle lives on the worker thread. `WinDivertShutdown` is
+    // the documented way to stop a blocked `WinDivertRecv`, so use it instead
+    // of relying on the process teardown, and then wait for the worker to close
+    // the handle. The wait is bounded: shutdown must never hang the process.
+    let (shutdown, stop_requested, done) = {
+        let mut rt = state.windivert.write().await;
+        if !rt.enabled {
+            return Ok(());
+        }
+        rt.enabled = false;
+        rt.state = "stopping".into();
+        // Detach the join handle: the worker reports completion through `done`,
+        // and joining it blindly is exactly what could block forever.
+        rt.thread.take();
+        let shutdown = rt.shutdown.lock().ok().and_then(|mut s| s.take());
+        (shutdown, rt.stop_requested.clone(), rt.done.clone())
+    };
+
+    // Re-inject instead of rewriting anything that is already queued.
+    stop_requested.store(true, Ordering::SeqCst);
+    if let Some(shutdown) = shutdown {
+        // SHUTDOWN_RECV stops the driver from queueing new packets while still
+        // allowing `send` to drain the packets that are already queued.
+        if let Err(e) = shutdown.shutdown_recv() {
+            tracing::warn!("WinDivert shutdown request failed: {e}");
         }
     }
-    let thread = rt.thread.take();
-    drop(rt);
-    if let Some(thread) = thread {
-        let _ = tokio::task::spawn_blocking(move || thread.join()).await;
+    if tokio::time::timeout(STOP_TIMEOUT, done.notified())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            "WinDivert worker did not stop within {}s; continuing shutdown",
+            STOP_TIMEOUT.as_secs()
+        );
     }
+
     let mut rt = state.windivert.write().await;
     rt.enabled = false;
     rt.state = "off".into();

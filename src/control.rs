@@ -2,6 +2,7 @@ use crate::config::{save_file_config, RuntimeConfig};
 use crate::model::{ConfigPatch, Status};
 use crate::proxy;
 use crate::state::AppState;
+use crate::upstream::UpstreamClient;
 use anyhow::{anyhow, Result};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -21,9 +22,49 @@ pub async fn apply_config(state: &Arc<AppState>, patch: ConfigPatch) -> Result<S
     if let Some(enabled) = patch.capture_enabled {
         next.capture_enabled = enabled;
     }
+    if let Some(enabled) = patch.upstream_proxy_enabled {
+        next.upstream_proxy_enabled = enabled;
+    }
+    if let Some(url) = patch.upstream_proxy_url {
+        next.upstream_proxy_url = url.trim().to_string();
+    }
+
+    let old_chain = match old.upstream_chain() {
+        Ok(chain) => chain,
+        Err(e) => {
+            // A stale/invalid address must not block unrelated edits; startup
+            // behaves the same way and keeps running without a chain.
+            tracing::warn!("ignoring invalid saved upstream chain proxy: {e}");
+            None
+        }
+    };
+    let new_chain = next
+        .upstream_chain()
+        .map_err(|e| anyhow!("invalid upstream proxy: {e}"))?;
+    if let Some(chain) = &new_chain {
+        if is_loopback(&chain.host) && chain.port == next.proxy_port {
+            return Err(anyhow!(
+                "upstream proxy cannot point to this MitmRs proxy port {}",
+                next.proxy_port
+            ));
+        }
+    }
+    let chain_changed = old_chain != new_chain;
+    let new_upstream = if chain_changed {
+        Some(UpstreamClient::new(
+            state.insecure_upstream,
+            new_chain.clone(),
+        )?)
+    } else {
+        None
+    };
+
     {
         let mut cfg = state.config.write().await;
         *cfg = next.clone();
+    }
+    if let Some(upstream) = new_upstream {
+        *state.upstream.write().await = upstream;
     }
     let file = state.file_config().await;
     if let Err(e) = save_file_config(&state.data_dir, &file) {
@@ -43,6 +84,15 @@ pub async fn apply_config(state: &Arc<AppState>, patch: ConfigPatch) -> Result<S
         }
     }
     Ok(state.status().await)
+}
+
+fn is_loopback(host: &str) -> bool {
+    // Windows resolves the whole 127.0.0.0/8 block (and ::1) to itself.
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 pub async fn action(
@@ -94,5 +144,7 @@ pub fn runtime_to_file(cfg: &RuntimeConfig) -> crate::config::FileConfig {
         proxy_port: cfg.proxy_port,
         max_body_bytes: cfg.max_body_bytes,
         capture_enabled: cfg.capture_enabled,
+        upstream_proxy_enabled: cfg.upstream_proxy_enabled,
+        upstream_proxy_url: cfg.upstream_proxy_url.clone(),
     }
 }

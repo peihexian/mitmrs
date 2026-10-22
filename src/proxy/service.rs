@@ -125,6 +125,11 @@ async fn proxy_request(
     let target = resolve_target(&req, &meta)?;
     let cfg = state.config.read().await.clone();
     let max_capture = cfg.max_body_bytes as usize;
+    let proxy_authorization = cfg
+        .upstream_chain()
+        .ok()
+        .flatten()
+        .and_then(|chain| chain.authorization);
     let request_headers = header_entries(req.headers());
     let request_mime = mime_from_headers(&request_headers);
     let (parts, body) = req.into_parts();
@@ -151,8 +156,15 @@ async fn proxy_request(
         version: version_text,
     };
 
-    let upstream_req = build_upstream_request(&parts.method, &parts.headers, &target, collected)?;
-    let response = match state.upstream.send(upstream_req).await {
+    let upstream_req = build_upstream_request(
+        &parts.method,
+        &parts.headers,
+        &target,
+        proxy_authorization.as_deref(),
+        collected,
+    )?;
+    let upstream = state.upstream.read().await.clone();
+    let response = match upstream.send(upstream_req).await {
         Ok(r) => r,
         Err(e) => {
             let msg = format!(
@@ -385,6 +397,7 @@ fn build_upstream_request(
     method: &Method,
     headers: &HeaderMap,
     target: &Target,
+    proxy_authorization: Option<&str>,
     body: Bytes,
 ) -> Result<Request<Full<Bytes>>, String> {
     let upstream_version = if crate::upstream::is_native_grpc(headers) {
@@ -410,6 +423,13 @@ fn build_upstream_request(
             }
         }
         builder = builder.header(name, value);
+    }
+    if target.scheme == "http" {
+        if let Some(auth) = proxy_authorization {
+            if let Ok(v) = HeaderValue::from_str(auth) {
+                builder = builder.header("proxy-authorization", v);
+            }
+        }
     }
     if !headers.contains_key(hyper::header::HOST) {
         let authority = authority_string(&target.host, target.port, &target.scheme);

@@ -74,6 +74,8 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "proxy_port": cfg.proxy_port,
         "max_body_bytes": cfg.max_body_bytes,
         "capture_enabled": cfg.capture_enabled,
+        "upstream_proxy_enabled": cfg.upstream_proxy_enabled,
+        "upstream_proxy_url": cfg.upstream_proxy_url,
     }))
 }
 
@@ -295,28 +297,39 @@ async fn events(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state.events.subscribe();
     let initial = state.status().await;
-    let stream = futures_util::stream::unfold((rx, 0u8), move |(mut rx, mut tick)| async move {
-        tokio::select! {
-            recv = rx.recv() => {
-                match recv {
-                    Ok(ev) => {
-                        let event = Event::default().event(ev.event).data(ev.data.to_string());
-                        Some((Ok(event), (rx, tick)))
+    // A long-lived SSE response keeps one request "in flight" forever, which
+    // makes hyper's graceful shutdown wait indefinitely. End the stream as soon
+    // as the process starts shutting down so Ctrl+C can actually exit.
+    let shutdown = state.shutdown.clone();
+    let stream = futures_util::stream::unfold(
+        (rx, 0u8, shutdown),
+        move |(mut rx, mut tick, shutdown)| async move {
+            if shutdown.is_cancelled() {
+                return None;
+            }
+            tokio::select! {
+                _ = shutdown.cancelled() => None,
+                recv = rx.recv() => {
+                    match recv {
+                        Ok(ev) => {
+                            let event = Event::default().event(ev.event).data(ev.data.to_string());
+                            Some((Ok(event), (rx, tick, shutdown)))
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            let event = Event::default().event("flow").data(json!({"lagged": n}).to_string());
+                            Some((Ok(event), (rx, tick, shutdown)))
+                        }
+                        Err(broadcast::error::RecvError::Closed) => None,
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        let event = Event::default().event("flow").data(json!({"lagged": n}).to_string());
-                        Some((Ok(event), (rx, tick)))
-                    }
-                    Err(broadcast::error::RecvError::Closed) => None,
+                }
+                _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                    tick = tick.wrapping_add(1);
+                    let event = Event::default().event("ping").data("{}");
+                    Some((Ok(event), (rx, tick, shutdown)))
                 }
             }
-            _ = tokio::time::sleep(Duration::from_secs(15)) => {
-                tick = tick.wrapping_add(1);
-                let event = Event::default().event("ping").data("{}");
-                Some((Ok(event), (rx, tick)))
-            }
-        }
-    });
+        },
+    );
     // Push an immediate status snapshot so the UI does not wait for the first flow.
     let initial_event = Event::default()
         .event("status")

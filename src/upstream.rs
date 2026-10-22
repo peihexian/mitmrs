@@ -1,3 +1,4 @@
+use base64::Engine;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -14,10 +15,11 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio_rustls::TlsConnector;
 use tower::Service;
+use url::Url;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -28,6 +30,85 @@ pub const UPSTREAM_PORT_MIN: u16 = 30000;
 pub const UPSTREAM_PORT_MAX: u16 = 39999;
 static NEXT_UPSTREAM_PORT: AtomicU16 = AtomicU16::new(UPSTREAM_PORT_MIN);
 
+/// Optional next-hop HTTP proxy ("chain proxy").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProxyChain {
+    pub host: String,
+    pub port: u16,
+    pub authorization: Option<String>,
+}
+
+impl ProxyChain {
+    /// Accepts `127.0.0.1:7890`, `http://127.0.0.1:7890`, and URL userinfo for
+    /// Basic proxy authentication. HTTPS-to-proxy and SOCKS are intentionally
+    /// not accepted here.
+    pub fn parse(input: &str) -> Result<Self, String> {
+        let raw = input.trim();
+        if raw.is_empty() {
+            return Err("upstream proxy address is empty".into());
+        }
+        let with_scheme = if raw.contains("://") {
+            raw.to_string()
+        } else {
+            format!("http://{raw}")
+        };
+        let url = Url::parse(&with_scheme)
+            .map_err(|e| format!("invalid upstream proxy address '{input}': {e}"))?;
+        if url.scheme() != "http" {
+            return Err(format!(
+                "unsupported upstream proxy scheme '{}': only http:// is supported",
+                url.scheme()
+            ));
+        }
+        if !url.path().is_empty() && url.path() != "/" {
+            return Err("upstream proxy address must not contain a path".into());
+        }
+        if url.query().is_some() || url.fragment().is_some() {
+            return Err("upstream proxy address must not contain query/fragment".into());
+        }
+        let host = url
+            .host_str()
+            .map(|s| s.trim_matches(['[', ']']).to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "upstream proxy address has no host".to_string())?;
+        let port = url.port_or_known_default().unwrap_or(80);
+        if port == 0 {
+            return Err("upstream proxy port must be between 1 and 65535".into());
+        }
+        let authorization = if url.username().is_empty() {
+            None
+        } else {
+            let user = percent_encoding::percent_decode_str(url.username())
+                .decode_utf8_lossy()
+                .into_owned();
+            let pass = url
+                .password()
+                .map(|p| {
+                    percent_encoding::percent_decode_str(p)
+                        .decode_utf8_lossy()
+                        .into_owned()
+                })
+                .unwrap_or_default();
+            let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+            Some(format!("Basic {token}"))
+        };
+        Ok(Self {
+            host,
+            port,
+            authorization,
+        })
+    }
+
+    fn connect_authority(&self, host: &str, port: u16) -> String {
+        let h = if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]")
+        } else {
+            host.to_string()
+        };
+        format!("{h}:{port}")
+    }
+}
+
 #[derive(Clone)]
 pub struct UpstreamClient {
     http1: Client<Connector, Full<Bytes>>,
@@ -36,18 +117,20 @@ pub struct UpstreamClient {
 }
 
 impl UpstreamClient {
-    pub fn new(insecure: bool) -> anyhow::Result<Self> {
+    pub fn new(insecure: bool, chain: Option<ProxyChain>) -> anyhow::Result<Self> {
         // Preserve the client's HTTP version on the upstream leg. Forcing
         // HTTP/2 for ordinary HTTP/1.1 clients breaks some gateways (APISIX
         // returns 400 when an h1 request is transformed into h2), while gRPC
         // needs a real h2 upstream. Separate pools also avoid cross-version
         // connection reuse.
-        let h1_connector = Connector::new(insecure, &[b"http/1.1"])?;
-        let h2_connector = Connector::new(insecure, &[b"h2"])?;
+        let chain = chain.map(Arc::new);
+        let h1_connector = Connector::new(insecure, &[b"http/1.1"], chain.clone(), false)?;
+        let h2_connector = Connector::new(insecure, &[b"h2"], chain.clone(), false)?;
+        let h2c_connector = Connector::new(insecure, &[b"h2"], chain, true)?;
         let http1 = Client::builder(TokioExecutor::new())
             .pool_idle_timeout(Duration::from_secs(30))
             .pool_timer(hyper_util::rt::TokioTimer::new())
-            .build(h1_connector.clone());
+            .build(h1_connector);
         let http2 = Client::builder(TokioExecutor::new())
             .pool_idle_timeout(Duration::from_secs(30))
             .pool_timer(hyper_util::rt::TokioTimer::new())
@@ -59,7 +142,7 @@ impl UpstreamClient {
             .http2_only(true)
             .pool_idle_timeout(Duration::from_secs(30))
             .pool_timer(hyper_util::rt::TokioTimer::new())
-            .build(h1_connector);
+            .build(h2c_connector);
         Ok(Self { http1, http2, h2c })
     }
 
@@ -100,10 +183,17 @@ pub fn is_native_grpc(headers: &http::HeaderMap) -> bool {
 #[derive(Clone)]
 pub struct Connector {
     tls: TlsConnector,
+    chain: Option<Arc<ProxyChain>>,
+    force_connect: bool,
 }
 
 impl Connector {
-    pub fn new(insecure: bool, alpn: &[&[u8]]) -> anyhow::Result<Self> {
+    pub fn new(
+        insecure: bool,
+        alpn: &[&[u8]],
+        chain: Option<Arc<ProxyChain>>,
+        force_connect: bool,
+    ) -> anyhow::Result<Self> {
         let mut roots = RootCertStore::empty();
         let native = rustls_native_certs::load_native_certs();
         for cert in native.certs {
@@ -127,6 +217,8 @@ impl Connector {
         };
         Ok(Self {
             tls: TlsConnector::from(Arc::new(config)),
+            chain,
+            force_connect,
         })
     }
 }
@@ -151,32 +243,25 @@ impl Service<Uri> for Connector {
             let port = uri
                 .port_u16()
                 .unwrap_or(if scheme == "https" { 443 } else { 80 });
-            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
-                .await?
-                .collect();
-            if addrs.is_empty() {
-                return Err(format!("DNS resolved no addresses for {host}:{port}").into());
-            }
-            let mut last_err = None;
-            let mut stream = None;
-            for addr in addrs {
-                match connect_bound(addr).await {
-                    Ok(s) => {
-                        let _ = s.set_nodelay(true);
-                        stream = Some(s);
-                        break;
-                    }
-                    Err(e) => last_err = Some(e),
+
+            let (stream, proxy_plain) = if let Some(chain) = this.chain.as_ref() {
+                if scheme == "https" || this.force_connect {
+                    (connect_via_chain(chain, &host, port).await?, false)
+                } else {
+                    // Plain HTTP: hyper will send an absolute-form request to
+                    // the upstream proxy because Connected::proxy(true).
+                    let stream = connect_tcp(&chain.host, chain.port).await.map_err(|e| {
+                        format!(
+                            "connect upstream proxy {}:{} failed: {e}",
+                            chain.host, chain.port
+                        )
+                    })?;
+                    (stream, true)
                 }
-            }
-            let stream = stream.ok_or_else(|| {
-                format!(
-                    "connect {host}:{port} failed: {}",
-                    last_err
-                        .map(|e| e.to_string())
-                        .unwrap_or_else(|| "unknown error".into())
-                )
-            })?;
+            } else {
+                (connect_tcp(&host, port).await?, false)
+            };
+
             if scheme == "https" {
                 let server_name = ServerName::try_from(host.clone())
                     .map_err(|e| format!("invalid TLS server name {host}: {e}"))?;
@@ -187,14 +272,126 @@ impl Service<Uri> for Connector {
                     .map_err(|e| format!("TLS handshake with {host}:{port} failed: {e}"))?;
                 Ok(TokioIo::new(UpstreamIo::Tls(tls)))
             } else {
-                Ok(TokioIo::new(UpstreamIo::Plain(stream)))
+                Ok(TokioIo::new(UpstreamIo::Plain(stream, proxy_plain)))
             }
         })
     }
 }
 
+async fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, BoxError> {
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("DNS lookup {host}:{port} failed: {e}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("DNS resolved no addresses for {host}:{port}").into());
+    }
+    let mut last_err = None;
+    for addr in addrs {
+        match connect_bound(addr).await {
+            Ok(s) => {
+                let _ = s.set_nodelay(true);
+                return Ok(s);
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(format!(
+        "connect {host}:{port} failed: {}",
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown error".into())
+    )
+    .into())
+}
+
+/// Open a TCP tunnel to `host:port` through the configured next-hop proxy.
+/// Used for HTTPS upstream connections and raw CONNECT tunnels.
+pub async fn connect_via_chain(
+    chain: &ProxyChain,
+    host: &str,
+    port: u16,
+) -> Result<TcpStream, BoxError> {
+    let stream = connect_tcp(&chain.host, chain.port).await.map_err(|e| {
+        format!(
+            "connect upstream proxy {}:{} failed: {e}",
+            chain.host, chain.port
+        )
+    })?;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        establish_tunnel(stream, host, port, chain),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "upstream proxy CONNECT {} via {}:{} timed out",
+            chain.connect_authority(host, port),
+            chain.host,
+            chain.port
+        )
+    })?
+}
+
+async fn establish_tunnel(
+    mut stream: TcpStream,
+    host: &str,
+    port: u16,
+    chain: &ProxyChain,
+) -> Result<TcpStream, BoxError> {
+    let authority = chain.connect_authority(host, port);
+    let mut request = format!(
+        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: Keep-Alive\r\n"
+    );
+    if let Some(auth) = chain.authorization.as_deref() {
+        request.push_str(&format!("Proxy-Authorization: {auth}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("write CONNECT to upstream proxy failed: {e}"))?;
+    stream
+        .flush()
+        .await
+        .map_err(|e| format!("flush CONNECT to upstream proxy failed: {e}"))?;
+
+    let mut head = Vec::with_capacity(512);
+    let mut byte = [0u8; 1];
+    loop {
+        if head.len() >= 64 * 1024 {
+            return Err("upstream proxy CONNECT response headers too large".into());
+        }
+        let n = stream
+            .read(&mut byte)
+            .await
+            .map_err(|e| format!("read CONNECT response from upstream proxy failed: {e}"))?;
+        if n == 0 {
+            return Err("upstream proxy closed the connection during CONNECT".into());
+        }
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    let head_text = String::from_utf8_lossy(&head);
+    let status_line = head_text.lines().next().unwrap_or_default().trim();
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok());
+    match status {
+        Some(code) if (200..300).contains(&code) => Ok(stream),
+        Some(code) => Err(format!(
+            "upstream proxy CONNECT {authority} returned {code} ({status_line})"
+        )
+        .into()),
+        None => Err(format!("invalid upstream proxy CONNECT response: {}", status_line).into()),
+    }
+}
+
 pub enum UpstreamIo {
-    Plain(TcpStream),
+    Plain(TcpStream, bool),
     Tls(tokio_rustls::client::TlsStream<TcpStream>),
 }
 
@@ -240,7 +437,7 @@ impl AsyncRead for UpstreamIo {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         match &mut *self {
-            UpstreamIo::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            UpstreamIo::Plain(s, _) => Pin::new(s).poll_read(cx, buf),
             UpstreamIo::Tls(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
@@ -253,25 +450,25 @@ impl AsyncWrite for UpstreamIo {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         match &mut *self {
-            UpstreamIo::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            UpstreamIo::Plain(s, _) => Pin::new(s).poll_write(cx, buf),
             UpstreamIo::Tls(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match &mut *self {
-            UpstreamIo::Plain(s) => Pin::new(s).poll_flush(cx),
+            UpstreamIo::Plain(s, _) => Pin::new(s).poll_flush(cx),
             UpstreamIo::Tls(s) => Pin::new(s).poll_flush(cx),
         }
     }
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match &mut *self {
-            UpstreamIo::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            UpstreamIo::Plain(s, _) => Pin::new(s).poll_shutdown(cx),
             UpstreamIo::Tls(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
     fn is_write_vectored(&self) -> bool {
         match self {
-            UpstreamIo::Plain(s) => s.is_write_vectored(),
+            UpstreamIo::Plain(s, _) => s.is_write_vectored(),
             UpstreamIo::Tls(s) => s.is_write_vectored(),
         }
     }
@@ -281,7 +478,7 @@ impl AsyncWrite for UpstreamIo {
         bufs: &[std::io::IoSlice<'_>],
     ) -> Poll<std::io::Result<usize>> {
         match &mut *self {
-            UpstreamIo::Plain(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            UpstreamIo::Plain(s, _) => Pin::new(s).poll_write_vectored(cx, bufs),
             UpstreamIo::Tls(s) => Pin::new(s).poll_write_vectored(cx, bufs),
         }
     }
@@ -290,7 +487,8 @@ impl AsyncWrite for UpstreamIo {
 impl Connection for UpstreamIo {
     fn connected(&self) -> Connected {
         match self {
-            UpstreamIo::Plain(_) => Connected::new(),
+            UpstreamIo::Plain(_, true) => Connected::new().proxy(true),
+            UpstreamIo::Plain(_, false) => Connected::new(),
             UpstreamIo::Tls(tls) => {
                 if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
                     Connected::new().negotiated_h2()
@@ -353,7 +551,7 @@ impl ServerCertVerifier for NoVerify {
 }
 #[cfg(test)]
 mod tests {
-    use super::is_native_grpc;
+    use super::{is_native_grpc, ProxyChain};
     use http::HeaderMap;
 
     fn with_content_type(value: &str) -> HeaderMap {
@@ -372,5 +570,38 @@ mod tests {
         )));
         assert!(!is_native_grpc(&with_content_type("application/json")));
         assert!(!is_native_grpc(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn parses_next_hop_address_forms() {
+        let plain = ProxyChain::parse(" 127.0.0.1:7890 ").unwrap();
+        assert_eq!(plain.host, "127.0.0.1");
+        assert_eq!(plain.port, 7890);
+        assert_eq!(plain.authorization, None);
+
+        let with_scheme = ProxyChain::parse("http://proxy.example:3128").unwrap();
+        assert_eq!(with_scheme.host, "proxy.example");
+        assert_eq!(with_scheme.port, 3128);
+
+        let with_auth = ProxyChain::parse("http://user:p%40ss@127.0.0.1:7890").unwrap();
+        assert_eq!(with_auth.host, "127.0.0.1");
+        assert_eq!(
+            with_auth.authorization.as_deref(),
+            Some("Basic dXNlcjpwQHNz")
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_or_malformed_next_hop_addresses() {
+        assert!(ProxyChain::parse("").unwrap_err().contains("empty"));
+        assert!(ProxyChain::parse("socks5://127.0.0.1:1080")
+            .unwrap_err()
+            .contains("only http://"));
+        assert!(ProxyChain::parse("http://127.0.0.1:7890/path")
+            .unwrap_err()
+            .contains("path"));
+        assert!(ProxyChain::parse("http://127.0.0.1:7890?x=1")
+            .unwrap_err()
+            .contains("query"));
     }
 }

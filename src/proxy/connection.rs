@@ -204,7 +204,24 @@ pub async fn serve_mitm_connect(
         serve_mitm_io(state, tls, meta, cancel).await;
     } else {
         // CONNECT to a non-TLS service. Tunnel it raw, preserving the first byte.
-        let upstream = match TcpStream::connect((host.as_str(), port)).await {
+        // When a next-hop proxy is configured, open the tunnel through it too.
+        let chain = {
+            let cfg = state.config.read().await;
+            match cfg.upstream_chain() {
+                Ok(chain) => chain,
+                Err(e) => {
+                    tracing::warn!("ignoring invalid upstream chain proxy: {e}");
+                    None
+                }
+            }
+        };
+        let upstream: Result<TcpStream, crate::upstream::BoxError> = match chain {
+            Some(chain) => crate::upstream::connect_via_chain(&chain, &host, port).await,
+            None => TcpStream::connect((host.as_str(), port))
+                .await
+                .map_err(Into::into),
+        };
+        let upstream = match upstream {
             Ok(s) => s,
             Err(e) => {
                 tracing::debug!("CONNECT tunnel to {host}:{port} failed: {e}");
