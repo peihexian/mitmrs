@@ -52,7 +52,7 @@ onBeforeUnmount(() => {
       </button>
     </div>
     <pre
-      class="mono app-scroll overflow-auto whitespace-pre-wrap break-words px-2.5 py-2 text-[10px] leading-[1.65] text-[#bcd0e1]"
+      class="mono app-scroll overflow-auto whitespace-pre-wrap break-words px-2.5 py-2 text-[10px] leading-[1.65] text-[var(--ui-code-text)]"
       :style="{ maxHeight }"
     >{{ code }}</pre>
   </div>

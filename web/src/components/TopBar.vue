@@ -2,6 +2,12 @@
 import { computed, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import type { ProxyAction, ProxyState, Status } from '../types'
+import { useTheme } from '../composables/useTheme'
+
+const { theme, toggleTheme } = useTheme()
+const themeToggleLabel = computed(() =>
+  theme.value === 'light' ? 'Switch to dark theme' : 'Switch to light theme',
+)
 
 const props = withDefaults(
   defineProps<{
@@ -168,7 +174,7 @@ function onPortBlur(): void {
             class="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-accent-400/60 to-transparent"
           />
         </div>
-        <div class="min-w-0">
+        <div class="hidden min-w-0 xs:block">
           <div class="flex items-baseline gap-1.5">
             <span class="text-[16px] font-bold leading-none tracking-[-0.025em] text-mist-200">
               Mitm<span class="text-accent-400">Rs</span>
@@ -330,6 +336,15 @@ function onPortBlur(): void {
           <AppIcon name="sparkles" :size="14" />
           <span class="hidden xl:inline">MCP</span>
         </button>
+        <button
+          class="icon-btn"
+          type="button"
+          :title="themeToggleLabel"
+          :aria-label="themeToggleLabel"
+          @click="toggleTheme"
+        >
+          <AppIcon :name="theme === 'light' ? 'moon' : 'sun'" :size="15" />
+        </button>
         <button class="icon-btn" type="button" title="Settings" aria-label="Settings" @click="emit('settings')">
           <AppIcon name="settings" :size="15" />
         </button>
@@ -375,6 +390,15 @@ function onPortBlur(): void {
           @click="emit('stop')"
         >
           <AppIcon name="stop" :size="12" />
+        </button>
+        <button
+          class="icon-btn"
+          type="button"
+          :title="themeToggleLabel"
+          :aria-label="themeToggleLabel"
+          @click="toggleTheme"
+        >
+          <AppIcon :name="theme === 'light' ? 'moon' : 'sun'" :size="16" />
         </button>
         <button class="icon-btn" type="button" aria-label="Settings" @click="emit('settings')">
           <AppIcon name="settings" :size="16" />

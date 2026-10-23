@@ -323,7 +323,7 @@ onBeforeUnmount(() => {
               :open="index < 2"
             >
               <summary
-                class="flex cursor-pointer list-none items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-medium text-mist-400 marker:hidden hover:bg-white/[0.025]"
+                class="flex cursor-pointer list-none items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-medium text-mist-400 marker:hidden hover:bg-[var(--ui-hover-soft)]"
               >
                 <AppIcon name="chevron-right" :size="10" class="text-mist-600 transition-transform group-open:rotate-90" />
                 Message {{ index + 1 }}
@@ -345,7 +345,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div v-if="hasTree" class="mt-3 overflow-hidden rounded-md border border-ink-700/70 bg-[#080d13]/55">
+        <div v-if="hasTree" class="mt-3 overflow-hidden rounded-md border border-ink-700/70 bg-[var(--ui-sunken)]">
           <div class="flex items-center justify-between border-b border-ink-700/50 px-2.5 py-1.5">
             <div class="flex items-center gap-1.5">
               <AppIcon name="code" :size="10" class="text-mist-600" />
@@ -358,7 +358,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div v-if="result.text" class="mt-3 overflow-hidden rounded-md border border-ink-700/70 bg-[#080d13]/55">
+        <div v-if="result.text" class="mt-3 overflow-hidden rounded-md border border-ink-700/70 bg-[var(--ui-sunken)]">
           <div class="flex items-center justify-between border-b border-ink-700/50 px-2.5 py-1.5">
             <div class="flex items-center gap-1.5">
               <AppIcon name="terminal" :size="10" class="text-mist-600" />
@@ -366,7 +366,7 @@ onBeforeUnmount(() => {
             </div>
             <span class="font-mono text-[8.5px] text-mist-700">{{ formatBytes(result.text.length) }}</span>
           </div>
-          <pre class="app-scroll max-h-[300px] overflow-auto whitespace-pre-wrap break-words px-2.5 py-2 font-mono text-[10px] leading-[1.65] text-[#bed1e0]">{{ result.text }}</pre>
+          <pre class="app-scroll max-h-[300px] overflow-auto whitespace-pre-wrap break-words px-2.5 py-2 font-mono text-[10px] leading-[1.65] text-[var(--ui-code-text-soft)]">{{ result.text }}</pre>
         </div>
 
         <p

@@ -128,7 +128,7 @@ const displayLabel = computed(() => {
 }
 
 .decode-tree-line:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--ui-tree-hover);
 }
 
 .is-root-node > .decode-tree-line {
@@ -137,7 +137,7 @@ const displayLabel = computed(() => {
 
 .decode-tree-children {
   margin-left: 11px;
-  border-left: 1px solid rgba(49, 67, 87, 0.55);
+  border-left: 1px solid var(--ui-tree-line);
   padding-left: 7px;
 }
 
@@ -145,7 +145,7 @@ const displayLabel = computed(() => {
   max-width: 42%;
   flex-shrink: 0;
   overflow: hidden;
-  color: #8db6cc;
+  color: var(--ui-tree-key);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -153,39 +153,39 @@ const displayLabel = computed(() => {
 .decode-value {
   min-width: 0;
   overflow-wrap: anywhere;
-  color: #c0d3e2;
+  color: var(--ui-tree-value);
 }
 
 .kind-string {
-  color: #86d7b5;
+  color: var(--ui-tree-string);
 }
 
 .kind-number {
-  color: #f0c27b;
+  color: var(--ui-tree-number);
 }
 
 .kind-boolean {
-  color: #7dc6e8;
+  color: var(--ui-tree-boolean);
 }
 
 .kind-null {
-  color: #7f91a5;
+  color: var(--ui-tree-null);
   font-style: italic;
 }
 
 .type-punctuation {
-  color: #63768c;
+  color: var(--ui-tree-punct);
 }
 
 .type-summary {
   margin: 0 4px;
-  color: #5c6e83;
+  color: var(--ui-tree-summary);
   font-size: 9.5px;
 }
 
 .decode-empty {
   padding-left: 25px;
-  color: #4d5e72;
+  color: var(--ui-tree-empty);
   font-size: 9.5px;
   font-style: italic;
 }

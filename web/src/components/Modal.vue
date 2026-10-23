@@ -78,7 +78,7 @@ onBeforeUnmount(() => {
     >
       <div
         ref="panel"
-        class="flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-xl border border-ink-700 bg-ink-900 shadow-[0_24px_100px_rgba(0,0,0,0.65)] outline-none sm:max-h-[86dvh] sm:rounded-xl"
+        class="flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-xl border border-ink-700 bg-ink-900 shadow-[0_24px_100px_var(--ui-shadow-modal)] outline-none sm:max-h-[86dvh] sm:rounded-xl"
         :class="sizeClass"
         role="dialog"
         aria-modal="true"

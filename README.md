@@ -33,7 +33,7 @@
 - **两种接入方式**
   - 显式代理：默认 `127.0.0.1:8080`，浏览器、curl、Python/Node SDK 直接设置 HTTP/HTTPS 代理。
   - WinDivert 透明重定向（可选，需管理员）：把本机出站 TCP `:80/:443` 重定向到本地代理，客户端无需配置代理。
-- **Web 分析界面**：流量列表、搜索/过滤、请求/响应/Headers/Trailers、JSON 美化、hex/raw、cURL 生成、SSE 实时刷新、解码树、MCP 示例；支持每页 100/200/500 条翻页、单条删除与一键清空（带确认）。
+- **Web 分析界面**：流量列表、搜索/过滤、请求/响应/Headers/Trailers、JSON 美化、hex/raw、cURL 生成、SSE 实时刷新、解码树、MCP 示例；左侧过滤栏、中间列表、右侧详情三块区域都支持鼠标拖动分隔条调整宽度（双击或按 Home 复位、方向键微调、宽度自动记忆），右侧详情默认更宽，请求/响应正文更容易阅读；支持深色/浅色主题一键切换（会记住选择，首次按系统偏好）；支持每页 100/200/500 条翻页、单条删除与一键清空（带确认）。
 - **AI 优先的 MCP 服务**：Streamable HTTP JSON-RPC 2.0 端点 `/mcp`，另有 `mcp-stdio` 桥接模式。AI 可以列出最近流量、分页搜索全部结果、过滤、读取上下行 body、切换解码格式、导出/导入、启停代理。
 - **内置解码器**：auto、HTTP 消息、HTTP/2、gRPC/gRPC-Web、Protobuf（无 `.proto`）、JSON、XML/HTML、表单、multipart、SSE、WebSocket 帧、TLS records/SNI、文本（含 GBK 等字符集）、base64、hex、gzip/deflate/brotli/zstd、raw。
 - **生命周期控制**：启动、停止、暂停、恢复、重启、运行时修改代理端口（自动重启监听）、开启/关闭抓包、MCP 同步控制。

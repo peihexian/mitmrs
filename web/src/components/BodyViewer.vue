@@ -218,7 +218,7 @@ defineExpose({
       </p>
     </div>
 
-    <div v-else class="app-scroll relative min-h-0 flex-1 overflow-auto bg-[#080d13]/65">
+    <div v-else class="app-scroll relative min-h-0 flex-1 overflow-auto bg-[var(--ui-sunken)]">
       <div class="sticky top-0 z-[1] flex h-6 items-center justify-between border-b border-ink-700/40 bg-ink-925/85 px-3 backdrop-blur-sm">
         <span class="font-mono text-[8.5px] uppercase tracking-[0.08em] text-mist-700">
           {{ mode === 'hex' ? 'Hex dump' : mode === 'pretty' ? formatted.language : 'Raw' }}
@@ -227,11 +227,11 @@ defineExpose({
       </div>
       <pre
         v-if="mode !== 'hex'"
-        class="mono whitespace-pre-wrap break-words px-3.5 py-3 text-[11px] leading-[1.65] text-[#c4d7e6] selection:bg-accent-500/25"
+        class="mono whitespace-pre-wrap break-words px-3.5 py-3 text-[11px] leading-[1.65] text-[var(--ui-code-text-soft)] selection:bg-accent-500/25"
       >{{ displayText || '(empty body)' }}</pre>
       <pre
         v-else
-        class="mono whitespace-pre px-3 py-2.5 text-[10px] leading-[1.6] text-[#a9c2d8]"
+        class="mono whitespace-pre px-3 py-2.5 text-[10px] leading-[1.6] text-[var(--ui-code-text-dim)]"
       >{{ hexText || '(no bytes)' }}</pre>
     </div>
   </section>

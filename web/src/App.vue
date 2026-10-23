@@ -31,6 +31,7 @@ import type {
 } from './types'
 import { api, errorMessage, isAbortError, searchParams } from './composables/useApi'
 import { useLive } from './composables/useLive'
+import { usePanelResize } from './composables/usePanelResize'
 import { toastError, toastInfo, toastSuccess } from './composables/useToasts'
 import {
   activeFilterCount,
@@ -106,6 +107,78 @@ const confirmBusy = ref(false)
 const sidebarOpen = ref(false)
 const busyAction = ref<ProxyAction | null>(null)
 const configBusy = ref(false)
+
+// --- Resizable three-pane layout -------------------------------------------
+// Every pane width is persisted in localStorage, clamped against the viewport,
+// and driven by drag handles between the filter sidebar, flow table, and detail
+// workspace. MAIN_MIN keeps the table usable when the detail pane is widened.
+const MAIN_MIN = 420
+const SIDEBAR_MIN = 200
+const SIDEBAR_HARD_MAX = 460
+const DETAIL_MIN = 360
+const DETAIL_HARD_MAX = 1100
+// Each splitter is a 7px hit area that overlaps its neighbours by 3px on both
+// sides, so the pair still reserves 2px of layout width.
+const SPLITTER_GUTTER = 2
+
+const {
+  width: sidebarWidth,
+  dragging: sidebarDragging,
+  start: startSidebarResize,
+  reset: resetSidebarWidth,
+  onKeydown: onSidebarResizeKeydown,
+  commit: commitSidebarLayout,
+} = usePanelResize({
+  storageKey: 'mitmrs.layout.sidebar',
+  min: SIDEBAR_MIN,
+  hardMax: SIDEBAR_HARD_MAX,
+  initial: () => 260,
+  max: () => window.innerWidth - detailWidth.value - MAIN_MIN - SPLITTER_GUTTER,
+  direction: 1,
+})
+
+const {
+  width: detailWidth,
+  dragging: detailDragging,
+  start: startDetailResize,
+  reset: resetDetailWidth,
+  onKeydown: onDetailResizeKeydown,
+  commit: commitDetailLayout,
+} = usePanelResize({
+  storageKey: 'mitmrs.layout.detail',
+  min: DETAIL_MIN,
+  hardMax: DETAIL_HARD_MAX,
+  initial: () => Math.round(Math.min(640, Math.max(460, window.innerWidth * 0.36))),
+  max: () => window.innerWidth - sidebarWidth.value - MAIN_MIN - SPLITTER_GUTTER,
+  direction: -1,
+})
+
+const layoutStyle = computed(() => ({
+  '--sidebar-w': `${sidebarWidth.value}px`,
+  '--detail-w': `${detailWidth.value}px`,
+}))
+
+/**
+ * Keeps the three panes inside the viewport after a reload or window resize.
+ * The detail workspace yields width first (it is the flexible reading area),
+ * then the filter sidebar, and the flow table keeps its minimum either way.
+ */
+function fitLayout(): void {
+  if (window.innerWidth < 1280) return
+  const budget = window.innerWidth - MAIN_MIN - SPLITTER_GUTTER
+  let overflow = sidebarWidth.value + detailWidth.value - budget
+  if (overflow <= 0) return
+  const detailGive = Math.min(Math.max(0, detailWidth.value - DETAIL_MIN), overflow)
+  if (detailGive > 0) {
+    detailWidth.value -= detailGive
+    overflow -= detailGive
+  }
+  if (overflow > 0) {
+    sidebarWidth.value = Math.max(SIDEBAR_MIN, sidebarWidth.value - overflow)
+  }
+  commitDetailLayout()
+  commitSidebarLayout()
+}
 
 let flowController: AbortController | null = null
 let statusController: AbortController | null = null
@@ -548,6 +621,8 @@ onMounted(() => {
   void loadFlows()
   void loadStats()
   if (live.value) liveControls.start()
+  fitLayout()
+  window.addEventListener('resize', fitLayout)
   window.addEventListener('keydown', onGlobalKeydown)
   document.addEventListener('visibilitychange', onVisibilityChange)
   statusTimer = window.setInterval(() => {
@@ -570,6 +645,7 @@ onBeforeUnmount(() => {
   ]) {
     if (timer != null) window.clearTimeout(timer)
   }
+  window.removeEventListener('resize', fitLayout)
   window.removeEventListener('keydown', onGlobalKeydown)
   document.removeEventListener('visibilitychange', onVisibilityChange)
 })
@@ -596,8 +672,8 @@ onBeforeUnmount(() => {
       @toggle-sidebar="sidebarOpen = true"
     />
 
-    <div class="app-main">
-      <div class="hidden min-h-0 lg:block">
+    <div class="app-main" :style="layoutStyle">
+      <div class="pane-sidebar">
         <FilterSidebar
           :filters="filters"
           :stats="stats"
@@ -609,7 +685,23 @@ onBeforeUnmount(() => {
         />
       </div>
 
-      <main class="flex min-h-0 min-w-0 flex-col bg-ink-950/40">
+      <div
+        class="splitter splitter-left"
+        :class="{ 'is-active': sidebarDragging }"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize filters panel"
+        :aria-valuenow="Math.round(sidebarWidth)"
+        :aria-valuemin="SIDEBAR_MIN"
+        :aria-valuemax="SIDEBAR_HARD_MAX"
+        tabindex="0"
+        title="Drag to resize · double-click to reset"
+        @pointerdown="startSidebarResize"
+        @dblclick="resetSidebarWidth"
+        @keydown="onSidebarResizeKeydown"
+      />
+
+      <main class="flex min-h-0 min-w-0 flex-1 flex-col bg-ink-950/40">
         <FlowToolbar
           :visible-count="flows.length"
           :total="total"
@@ -646,6 +738,22 @@ onBeforeUnmount(() => {
           @open-ca="openModal('ca')"
         />
       </main>
+
+      <div
+        class="splitter splitter-right"
+        :class="{ 'is-active': detailDragging }"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize details panel"
+        :aria-valuenow="Math.round(detailWidth)"
+        :aria-valuemin="DETAIL_MIN"
+        :aria-valuemax="DETAIL_HARD_MAX"
+        tabindex="0"
+        title="Drag to resize · double-click to reset"
+        @pointerdown="startDetailResize"
+        @dblclick="resetDetailWidth"
+        @keydown="onDetailResizeKeydown"
+      />
 
       <aside class="detail-shell border-l border-ink-700/80" :class="{ 'is-open': selectedId != null }">
         <FlowDetail
@@ -752,11 +860,57 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .app-main {
-  display: grid;
+  position: relative;
+  display: flex;
   min-height: 0;
   flex: 1;
-  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
   overflow: hidden;
+}
+
+.pane-sidebar {
+  display: none;
+  min-width: 0;
+  flex: 0 0 auto;
+  width: var(--sidebar-w, 260px);
+}
+
+/* Splitter handles overlap their neighbours slightly so the hit area is
+   comfortable while only a hairline is visible at rest. */
+.splitter {
+  position: relative;
+  z-index: 5;
+  display: none;
+  flex: 0 0 7px;
+  width: 7px;
+  margin: 0 -3px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.splitter::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: var(--ui-hairline);
+  transition:
+    width 120ms ease,
+    background 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.splitter:hover::after,
+.splitter:focus-visible::after,
+.splitter.is-active::after {
+  width: 2px;
+  background: var(--ui-splitter-line);
+  box-shadow: 0 0 10px var(--ui-splitter-glow);
 }
 
 .detail-shell {
@@ -768,7 +922,7 @@ onBeforeUnmount(() => {
   min-height: 0;
   visibility: hidden;
   transform: translateX(100%);
-  background: #0b1118;
+  background: var(--ui-panel);
   transition:
     transform 180ms ease,
     visibility 180ms ease;
@@ -780,20 +934,26 @@ onBeforeUnmount(() => {
 }
 
 @media (min-width: 1024px) {
-  .app-main {
-    grid-template-columns: 260px minmax(0, 1fr);
+  .pane-sidebar {
+    display: flex;
+  }
+
+  .splitter-left {
+    display: block;
   }
 }
 
 @media (min-width: 1280px) {
-  .app-main {
-    grid-template-columns: 260px minmax(0, 1fr) clamp(420px, 33vw, 470px);
+  .splitter-right {
+    display: block;
   }
 
   .detail-shell {
     position: relative;
     inset: auto;
     z-index: auto;
+    flex: 0 0 auto;
+    width: var(--detail-w, 470px);
     visibility: visible;
     transform: none;
     transition: none;

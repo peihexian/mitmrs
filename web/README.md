@@ -42,6 +42,13 @@ consistent on Windows when a host-level `script-shell` setting interferes with
   gRPC messages, metadata), generated cURL, and selected-flow MCP examples.
 - Proxy lifecycle controls, listener port apply, import/export (native JSON and
   HAR), CA download/trust guidance, MCP client setup, settings, and toasts.
+- Drag-resizable desktop panes: the filter sidebar, flow table, and detail
+  workspace are separated by splitter handles. Each pane remembers its width in
+  `localStorage`; double-click or `Home` resets a splitter and arrow keys nudge
+  it. The detail workspace starts wide and can grow to 1100px so request and
+  response bodies stay readable.
+- Dark and light themes with a top-bar toggle. The choice is remembered, and a
+  first visit follows the operating system colour-scheme preference.
 - Responsive layout: mobile filter drawer, full-screen flow detail below
   `xl`, condensed table columns, and a dense desktop three-pane layout.
 - Search and filter state is mirrored into URL query parameters; `live=0`

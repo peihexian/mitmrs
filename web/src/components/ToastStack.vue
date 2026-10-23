@@ -35,7 +35,7 @@ const tone: Record<Toast['kind'], { border: string; icon: string; iconColor: str
         <div
           v-for="toast in toasts"
           :key="toast.id"
-          class="pointer-events-auto flex items-start gap-2.5 rounded-lg border bg-ink-900/95 p-3 shadow-[0_12px_36px_rgba(0,0,0,0.5)] backdrop-blur"
+          class="pointer-events-auto flex items-start gap-2.5 rounded-lg border bg-ink-900/95 p-3 shadow-[0_12px_36px_var(--ui-shadow-toast)] backdrop-blur"
           :class="tone[toast.kind].border"
           role="status"
         >

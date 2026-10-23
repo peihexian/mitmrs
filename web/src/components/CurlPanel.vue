@@ -99,14 +99,14 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="app-scroll min-h-0 flex-1 p-3">
-      <div class="overflow-hidden rounded-md border border-ink-700/80 bg-[#080d13]/75">
+      <div class="overflow-hidden rounded-md border border-ink-700/80 bg-[var(--ui-sunken)]">
         <div class="flex items-center gap-1.5 border-b border-ink-700/50 px-2.5 py-1.5">
           <span class="h-2 w-2 rounded-full bg-rose-500/50" />
           <span class="h-2 w-2 rounded-full bg-amber-500/45" />
           <span class="h-2 w-2 rounded-full bg-emerald-500/45" />
           <span class="ml-1 font-mono text-[8.5px] text-mist-700">request.sh</span>
         </div>
-        <pre class="mono app-scroll max-h-[min(52vh,520px)] overflow-auto whitespace-pre-wrap break-all px-3 py-3 text-[10.5px] leading-[1.7] text-[#c1d5e5]">{{ curlCommand }}</pre>
+        <pre class="mono app-scroll max-h-[min(52vh,520px)] overflow-auto whitespace-pre-wrap break-all px-3 py-3 text-[10.5px] leading-[1.7] text-[var(--ui-code-text-soft)]">{{ curlCommand }}</pre>
       </div>
 
       <div class="mt-2.5 flex items-start gap-1.5 text-[9.5px] leading-relaxed text-mist-700">

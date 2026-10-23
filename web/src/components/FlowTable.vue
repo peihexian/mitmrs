@@ -269,7 +269,7 @@ onBeforeUnmount(() => {
       class="app-scroll min-h-0 flex-1"
     >
       <div class="mx-auto flex min-h-full w-full max-w-[680px] flex-col justify-center px-5 py-8">
-        <div class="empty-hero relative overflow-hidden rounded-xl border border-ink-700/80 bg-ink-900/55 p-5 shadow-[0_18px_60px_rgba(0,0,0,0.25)] sm:p-6">
+        <div class="empty-hero relative overflow-hidden rounded-xl border border-ink-700/80 bg-ink-900/55 p-5 shadow-[0_18px_60px_var(--ui-shadow-hero)] sm:p-6">
           <div class="pointer-events-none absolute -right-20 -top-24 h-52 w-52 rounded-full bg-accent-500/[0.055] blur-2xl" />
           <div class="pointer-events-none absolute -bottom-28 -left-20 h-52 w-52 rounded-full bg-teal-500/[0.04] blur-2xl" />
           <div class="relative flex items-start gap-4">
@@ -317,7 +317,7 @@ onBeforeUnmount(() => {
                 Start
               </button>
             </div>
-            <div class="mono mt-2 flex items-center gap-2 overflow-hidden rounded border border-ink-700/60 bg-black/20 px-2.5 py-1.5 text-[9.5px] text-mist-600">
+            <div class="mono mt-2 flex items-center gap-2 overflow-hidden rounded border border-ink-700/60 bg-ink-950/40 px-2.5 py-1.5 text-[9.5px] text-mist-600">
               <span class="text-accent-500/60">$</span>
               <span class="truncate">curl -x http://{{ proxyAddress }} https://httpbin.org/json</span>
             </div>
@@ -545,8 +545,8 @@ onBeforeUnmount(() => {
 <style scoped>
 .flow-head {
   height: 33px;
-  border-bottom: 1px solid rgba(33, 48, 64, 0.7);
-  background: rgba(12, 18, 26, 0.72);
+  border-bottom: 1px solid var(--ui-hairline);
+  background: var(--ui-table-head);
   padding: 0 8px;
 }
 
@@ -569,7 +569,7 @@ onBeforeUnmount(() => {
 .flow-row {
   top: 0;
   cursor: pointer;
-  border-bottom: 1px solid rgba(33, 48, 64, 0.34);
+  border-bottom: 1px solid var(--ui-hairline-soft);
   background: transparent;
   transition:
     background-color 90ms ease,
@@ -578,28 +578,28 @@ onBeforeUnmount(() => {
 }
 
 .flow-row:hover {
-  background: rgba(255, 255, 255, 0.023);
+  background: var(--ui-row-hover);
 }
 
 .flow-row.is-selected {
-  background: rgba(34, 211, 238, 0.065);
-  box-shadow: inset 2px 0 0 rgba(34, 211, 238, 0.8);
+  background: var(--ui-row-selected);
+  box-shadow: inset 2px 0 0 var(--ui-row-selected-line);
 }
 
 .flow-row.is-error:not(.is-selected) {
-  background: rgba(244, 63, 94, 0.025);
-  box-shadow: inset 2px 0 0 rgba(244, 63, 94, 0.42);
+  background: var(--ui-row-error);
+  box-shadow: inset 2px 0 0 var(--ui-row-error-line);
 }
 
 .flow-row:focus-visible {
   box-shadow:
-    inset 2px 0 0 rgba(34, 211, 238, 0.9),
-    inset 0 0 0 1px rgba(34, 211, 238, 0.25);
+    inset 2px 0 0 var(--ui-row-selected-line-strong),
+    inset 0 0 0 1px var(--ui-row-selected-ring);
 }
 
 .flow-skeleton-row {
   height: 38px;
-  border-bottom: 1px solid rgba(33, 48, 64, 0.26);
+  border-bottom: 1px solid var(--ui-hairline-faint);
 }
 
 .flow-table {
@@ -611,11 +611,7 @@ onBeforeUnmount(() => {
 }
 
 .empty-hero {
-  background-image: linear-gradient(
-    180deg,
-    rgba(18, 26, 36, 0.85),
-    rgba(11, 17, 24, 0.7)
-  );
+  background-image: var(--ui-hero-bg);
 }
 
 @media (min-width: 640px) {

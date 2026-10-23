@@ -153,7 +153,7 @@ onBeforeUnmount(() => {
             <AppIcon :name="copiedKey === example.key ? 'check' : 'copy'" :size="11" :class="copiedKey === example.key ? 'text-emerald-400' : ''" />
           </button>
         </div>
-        <pre class="mono app-scroll max-h-[190px] overflow-auto px-2.5 py-2 text-[9.5px] leading-[1.65] text-[#b8cde0]">{{ jsonStringify(example.call) }}</pre>
+        <pre class="mono app-scroll max-h-[190px] overflow-auto px-2.5 py-2 text-[9.5px] leading-[1.65] text-[var(--ui-code-text)]">{{ jsonStringify(example.call) }}</pre>
       </div>
     </div>
 

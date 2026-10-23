@@ -335,7 +335,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
           <button
             v-for="item in topHosts"
             :key="item.host"
-            class="group relative flex w-full items-center gap-2 overflow-hidden rounded px-1.5 py-[5px] text-left transition hover:bg-white/[0.035]"
+            class="group relative flex w-full items-center gap-2 overflow-hidden rounded px-1.5 py-[5px] text-left transition hover:bg-[var(--ui-hover)]"
             :class="filters.host === item.host ? 'bg-accent-500/[0.055]' : ''"
             type="button"
             :title="`Filter by ${item.host}`"

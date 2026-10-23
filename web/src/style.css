@@ -37,13 +37,217 @@
   --text-2xs--line-height: 1rem;
   --text-3xs: 0.625rem;
   --text-3xs--line-height: 0.875rem;
+
+  /* Very small phones: the top bar drops the wordmark below this width. */
+  --breakpoint-xs: 26.25rem;
 }
 
+/* -------------------------------------------------------------------------
+   Theme tokens
+   The whole palette is driven by custom properties so switching between the
+   dark ("black") and light ("white") themes only swaps variable values. Any
+   surface that used a literal color keeps its own --ui-* token here.
+   ------------------------------------------------------------------------- */
 :root {
   color-scheme: dark;
-  --surface-glass: rgba(13, 19, 27, 0.82);
-  --grid-line: rgba(75, 96, 119, 0.16);
-  --accent-glow: rgba(34, 211, 238, 0.12);
+
+  --ui-canvas:
+    radial-gradient(
+      1300px 620px at 82% -12%,
+      rgba(34, 211, 238, 0.065),
+      transparent 62%
+    ),
+    radial-gradient(
+      900px 500px at -8% 112%,
+      rgba(20, 184, 166, 0.045),
+      transparent 58%
+    ),
+    linear-gradient(180deg, #080c12 0%, #070b10 100%);
+  --ui-panel: #0b1118;
+  --ui-panel-soft: rgba(13, 19, 27, 0.72);
+  --ui-sunken: #080d13;
+  --ui-raised: #0c121a;
+  --ui-table-head: rgba(12, 18, 26, 0.72);
+  --ui-hero-bg: linear-gradient(
+    180deg,
+    rgba(18, 26, 36, 0.85),
+    rgba(11, 17, 24, 0.7)
+  );
+  --ui-hairline: rgba(33, 48, 64, 0.7);
+  --ui-hairline-soft: rgba(33, 48, 64, 0.34);
+  --ui-hairline-faint: rgba(33, 48, 64, 0.26);
+  --ui-hover: rgba(255, 255, 255, 0.045);
+  --ui-hover-soft: rgba(255, 255, 255, 0.025);
+  --ui-row-hover: rgba(255, 255, 255, 0.023);
+  --ui-row-selected: rgba(34, 211, 238, 0.065);
+  --ui-row-selected-line: rgba(34, 211, 238, 0.8);
+  --ui-row-selected-line-strong: rgba(34, 211, 238, 0.9);
+  --ui-row-selected-ring: rgba(34, 211, 238, 0.25);
+  --ui-row-error: rgba(244, 63, 94, 0.025);
+  --ui-row-error-line: rgba(244, 63, 94, 0.42);
+  --ui-scrollbar: #2a394b;
+  --ui-scrollbar-hover: #3b4f65;
+  --ui-field-bg: rgba(7, 11, 16, 0.6);
+  --ui-field-bg-focus: rgba(7, 11, 16, 0.85);
+  --ui-field-shadow: rgba(34, 211, 238, 0.075);
+  --ui-option-bg: #111923;
+  --ui-btn-top: rgba(30, 43, 58, 0.92);
+  --ui-btn-bottom: rgba(21, 31, 43, 0.92);
+  --ui-btn-top-hover: rgba(38, 55, 73, 0.98);
+  --ui-btn-bottom-hover: rgba(27, 40, 55, 0.98);
+  --ui-btn-active: #16202c;
+  --ui-btn-inset: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  --ui-danger-border: rgba(248, 113, 113, 0.28);
+  --ui-danger-border-hover: rgba(248, 113, 113, 0.5);
+  --ui-danger-bg-hover: rgba(127, 29, 29, 0.25);
+  --ui-danger-text: #fca5a5;
+  --ui-danger-text-hover: #fecaca;
+  --ui-panel-border: rgba(34, 211, 238, 0.38);
+  --ui-segmented-bg: rgba(7, 11, 16, 0.45);
+  --ui-chip-bg: rgba(9, 14, 21, 0.4);
+  --ui-code-surface: rgba(6, 10, 15, 0.72);
+  --ui-code-text: #bfd4e6;
+  --ui-code-text-soft: #c4d7e6;
+  --ui-code-text-dim: #a9c2d8;
+  --ui-selection-bg: rgba(34, 211, 238, 0.28);
+  --ui-selection-text: #f1faff;
+  --ui-skeleton-a: rgba(255, 255, 255, 0.035);
+  --ui-skeleton-b: rgba(255, 255, 255, 0.075);
+  --ui-shadow-hero: rgba(0, 0, 0, 0.25);
+  --ui-shadow-modal: rgba(0, 0, 0, 0.65);
+  --ui-shadow-toast: rgba(0, 0, 0, 0.5);
+  --ui-splitter-line: rgba(34, 211, 238, 0.55);
+  --ui-splitter-glow: rgba(34, 211, 238, 0.11);
+  --ui-tree-hover: rgba(255, 255, 255, 0.03);
+  --ui-tree-line: rgba(49, 67, 87, 0.55);
+  --ui-tree-key: #8db6cc;
+  --ui-tree-value: #c0d3e2;
+  --ui-tree-string: #86d7b5;
+  --ui-tree-number: #f0c27b;
+  --ui-tree-boolean: #7dc6e8;
+  --ui-tree-null: #7f91a5;
+  --ui-tree-punct: #63768c;
+  --ui-tree-summary: #5c6e83;
+  --ui-tree-empty: #4d5e72;
+}
+
+html.theme-light {
+  color-scheme: light;
+
+  /* Ink scale: chrome surfaces (page → raised panels → borders). */
+  --color-ink-950: #eef2f7;
+  --color-ink-925: #f7f9fc;
+  --color-ink-900: #ffffff;
+  --color-ink-875: #f4f7fa;
+  --color-ink-850: #eaeff5;
+  --color-ink-800: #e2e8f0;
+  --color-ink-750: #d8e1eb;
+  --color-ink-700: #cbd5e1;
+  --color-ink-650: #bfcbdb;
+  --color-ink-600: #a9b8c9;
+
+  /* Mist scale: text, inverted for legibility on light surfaces. */
+  --color-mist-200: #0a1726;
+  --color-mist-300: #16263a;
+  --color-mist-400: #33465c;
+  --color-mist-500: #4f647a;
+  --color-mist-600: #5b7084;
+  --color-mist-650: #68798c;
+  --color-mist-700: #78899b;
+
+  /* Accent + status hues: depth is flipped so text stays readable. */
+  --color-accent-200: #155e75;
+  --color-accent-300: #0e7490;
+  --color-accent-400: #0891b2;
+  --color-accent-500: #06b6d4;
+  --color-accent-600: #0891b2;
+  --color-rose-200: #9f1239;
+  --color-rose-300: #be123c;
+  --color-rose-400: #e11d48;
+  --color-emerald-200: #065f46;
+  --color-emerald-300: #047857;
+  --color-emerald-400: #059669;
+  --color-amber-300: #b45309;
+  --color-amber-400: #d97706;
+  --color-sky-300: #0369a1;
+  --color-sky-400: #0284c7;
+  --color-teal-300: #0f766e;
+  --color-teal-400: #0d9488;
+
+  --ui-canvas:
+    radial-gradient(
+      1200px 580px at 84% -12%,
+      rgba(8, 145, 178, 0.1),
+      transparent 62%
+    ),
+    radial-gradient(
+      900px 480px at -8% 112%,
+      rgba(13, 148, 136, 0.07),
+      transparent 58%
+    ),
+    linear-gradient(180deg, #f8fafc 0%, #eef3f8 100%);
+  --ui-panel: #ffffff;
+  --ui-panel-soft: rgba(255, 255, 255, 0.85);
+  --ui-sunken: #f6f9fc;
+  --ui-raised: #ffffff;
+  --ui-table-head: rgba(255, 255, 255, 0.78);
+  --ui-hero-bg: linear-gradient(180deg, #ffffff, #f3f7fb);
+  --ui-hairline: rgba(148, 163, 184, 0.5);
+  --ui-hairline-soft: rgba(148, 163, 184, 0.36);
+  --ui-hairline-faint: rgba(148, 163, 184, 0.28);
+  --ui-hover: rgba(15, 23, 42, 0.055);
+  --ui-hover-soft: rgba(15, 23, 42, 0.035);
+  --ui-row-hover: rgba(15, 23, 42, 0.035);
+  --ui-row-selected: rgba(8, 145, 178, 0.1);
+  --ui-row-selected-line: rgba(8, 145, 178, 0.75);
+  --ui-row-selected-line-strong: rgba(8, 145, 178, 0.85);
+  --ui-row-selected-ring: rgba(8, 145, 178, 0.3);
+  --ui-row-error: rgba(225, 29, 72, 0.04);
+  --ui-row-error-line: rgba(225, 29, 72, 0.4);
+  --ui-scrollbar: #c3cfdd;
+  --ui-scrollbar-hover: #a8b8ca;
+  --ui-field-bg: #ffffff;
+  --ui-field-bg-focus: #ffffff;
+  --ui-field-shadow: rgba(8, 145, 178, 0.12);
+  --ui-option-bg: #ffffff;
+  --ui-btn-top: #ffffff;
+  --ui-btn-bottom: #f1f5f9;
+  --ui-btn-top-hover: #ffffff;
+  --ui-btn-bottom-hover: #e8eef5;
+  --ui-btn-active: #e2e8f0;
+  --ui-btn-inset: inset 0 1px 0 #ffffff;
+  --ui-danger-border: rgba(225, 29, 72, 0.32);
+  --ui-danger-border-hover: rgba(225, 29, 72, 0.55);
+  --ui-danger-bg-hover: rgba(225, 29, 72, 0.08);
+  --ui-danger-text: #be123c;
+  --ui-danger-text-hover: #9f1239;
+  --ui-panel-border: rgba(8, 145, 178, 0.45);
+  --ui-segmented-bg: #f1f5f9;
+  --ui-chip-bg: rgba(15, 23, 42, 0.035);
+  --ui-code-surface: #f8fafc;
+  --ui-code-text: #1f3448;
+  --ui-code-text-soft: #24384c;
+  --ui-code-text-dim: #3b5266;
+  --ui-selection-bg: rgba(8, 145, 178, 0.2);
+  --ui-selection-text: #052b36;
+  --ui-skeleton-a: rgba(15, 23, 42, 0.045);
+  --ui-skeleton-b: rgba(15, 23, 42, 0.09);
+  --ui-shadow-hero: rgba(15, 23, 42, 0.08);
+  --ui-shadow-modal: rgba(15, 23, 42, 0.28);
+  --ui-shadow-toast: rgba(15, 23, 42, 0.18);
+  --ui-splitter-line: rgba(8, 145, 178, 0.55);
+  --ui-splitter-glow: rgba(8, 145, 178, 0.1);
+  --ui-tree-hover: rgba(15, 23, 42, 0.04);
+  --ui-tree-line: rgba(148, 163, 184, 0.45);
+  --ui-tree-key: #0e7490;
+  --ui-tree-value: #1f3448;
+  --ui-tree-string: #047857;
+  --ui-tree-number: #b45309;
+  --ui-tree-boolean: #0369a1;
+  --ui-tree-null: #64748b;
+  --ui-tree-punct: #94a3b8;
+  --ui-tree-summary: #64748b;
+  --ui-tree-empty: #94a3b8;
 }
 
 * {
@@ -66,6 +270,9 @@ body {
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  transition:
+    background-color 160ms ease,
+    color 160ms ease;
 }
 
 button,
@@ -81,8 +288,8 @@ button,
 }
 
 ::selection {
-  background: rgba(34, 211, 238, 0.28);
-  color: #f1faff;
+  background: var(--ui-selection-bg);
+  color: var(--ui-selection-text);
 }
 
 :focus-visible {
@@ -92,7 +299,7 @@ button,
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: #2a394b transparent;
+  scrollbar-color: var(--ui-scrollbar) transparent;
 }
 
 *::-webkit-scrollbar {
@@ -108,26 +315,23 @@ button,
   border: 2px solid transparent;
   border-radius: 999px;
   background-clip: padding-box;
-  background-color: #2a394b;
+  background-color: var(--ui-scrollbar);
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background-color: #3b4f65;
+  background-color: var(--ui-scrollbar-hover);
 }
 
 .app-canvas {
-  background:
-    radial-gradient(
-      1300px 620px at 82% -12%,
-      rgba(34, 211, 238, 0.065),
-      transparent 62%
-    ),
-    radial-gradient(
-      900px 500px at -8% 112%,
-      rgba(20, 184, 166, 0.045),
-      transparent 58%
-    ),
-    linear-gradient(180deg, #080c12 0%, #070b10 100%);
+  background: var(--ui-canvas);
+}
+
+/* While a pane splitter is being dragged the whole document keeps the
+   resize cursor and ignores text selection. */
+html.is-resizing-layout,
+html.is-resizing-layout * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 @layer components {
@@ -147,15 +351,15 @@ button,
     border-radius: 0.4rem;
     background: linear-gradient(
       180deg,
-      rgba(30, 43, 58, 0.92),
-      rgba(21, 31, 43, 0.92)
+      var(--ui-btn-top),
+      var(--ui-btn-bottom)
     );
     padding: 0 0.65rem;
     color: var(--color-mist-300);
     font-size: 12px;
     font-weight: 500;
     white-space: nowrap;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+    box-shadow: var(--ui-btn-inset);
     transition:
       border-color 120ms ease,
       background 120ms ease,
@@ -167,14 +371,14 @@ button,
     border-color: var(--color-ink-600);
     background: linear-gradient(
       180deg,
-      rgba(38, 55, 73, 0.98),
-      rgba(27, 40, 55, 0.98)
+      var(--ui-btn-top-hover),
+      var(--ui-btn-bottom-hover)
     );
     color: var(--color-mist-200);
   }
 
   .btn:active:not(:disabled) {
-    background: var(--color-ink-800);
+    background: var(--ui-btn-active);
   }
 
   .btn:disabled {
@@ -183,7 +387,7 @@ button,
   }
 
   .btn-primary {
-    border-color: rgba(34, 211, 238, 0.38);
+    border-color: var(--ui-panel-border);
     background: linear-gradient(180deg, #0d98b3, #077f99);
     color: #effdff;
     box-shadow:
@@ -198,14 +402,14 @@ button,
   }
 
   .btn-danger {
-    border-color: rgba(248, 113, 113, 0.28);
-    color: #fca5a5;
+    border-color: var(--ui-danger-border);
+    color: var(--ui-danger-text);
   }
 
   .btn-danger:hover:not(:disabled) {
-    border-color: rgba(248, 113, 113, 0.5);
-    background: rgba(127, 29, 29, 0.25);
-    color: #fecaca;
+    border-color: var(--ui-danger-border-hover);
+    background: var(--ui-danger-bg-hover);
+    color: var(--ui-danger-text-hover);
   }
 
   .btn-ghost {
@@ -216,7 +420,7 @@ button,
 
   .btn-ghost:hover:not(:disabled) {
     border-color: transparent;
-    background: rgba(255, 255, 255, 0.045);
+    background: var(--ui-hover);
   }
 
   .btn-sm {
@@ -243,7 +447,7 @@ button,
 
   .icon-btn:hover:not(:disabled) {
     border-color: var(--color-ink-700);
-    background: rgba(255, 255, 255, 0.045);
+    background: var(--ui-hover);
     color: var(--color-mist-200);
   }
 
@@ -269,7 +473,7 @@ button,
     height: 2rem;
     border: 1px solid var(--color-ink-700);
     border-radius: 0.38rem;
-    background: rgba(7, 11, 16, 0.6);
+    background: var(--ui-field-bg);
     padding: 0 0.55rem;
     color: var(--color-mist-300);
     font-size: 12px;
@@ -290,8 +494,8 @@ button,
 
   .field:focus {
     border-color: rgba(34, 211, 238, 0.55);
-    background: rgba(7, 11, 16, 0.85);
-    box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.075);
+    background: var(--ui-field-bg-focus);
+    box-shadow: 0 0 0 3px var(--ui-field-shadow);
   }
 
   .field-mono {
@@ -309,7 +513,7 @@ button,
   }
 
   select.field option {
-    background: #111923;
+    background: var(--ui-option-bg);
     color: var(--color-mist-200);
   }
 
@@ -366,7 +570,7 @@ button,
     gap: 0.25rem;
     border: 1px solid var(--color-ink-700);
     border-radius: 0.3rem;
-    background: rgba(9, 14, 21, 0.4);
+    background: var(--ui-chip-bg);
     padding: 0 0.45rem;
     color: var(--color-mist-500);
     font-family: var(--font-mono);
@@ -391,7 +595,7 @@ button,
   .panel {
     border: 1px solid var(--color-ink-700);
     border-radius: 0.5rem;
-    background: rgba(13, 19, 27, 0.72);
+    background: var(--ui-panel-soft);
   }
 
   .section-title {
@@ -412,7 +616,7 @@ button,
     gap: 2px;
     border: 1px solid var(--color-ink-700);
     border-radius: 0.38rem;
-    background: rgba(7, 11, 16, 0.45);
+    background: var(--ui-segmented-bg);
     padding: 2px;
   }
 
@@ -445,13 +649,13 @@ button,
     position: relative;
     border: 1px solid var(--color-ink-700);
     border-radius: 0.4rem;
-    background: rgba(6, 10, 15, 0.72);
+    background: var(--ui-code-surface);
   }
 
   .code-block {
     overflow: auto;
     padding: 0.7rem 0.8rem;
-    color: #bfd4e6;
+    color: var(--ui-code-text);
     font-family: var(--font-mono);
     font-size: 11.5px;
     line-height: 1.65;
@@ -542,9 +746,9 @@ button,
 .skeleton {
   background: linear-gradient(
     90deg,
-    rgba(255, 255, 255, 0.035),
-    rgba(255, 255, 255, 0.075),
-    rgba(255, 255, 255, 0.035)
+    var(--ui-skeleton-a),
+    var(--ui-skeleton-b),
+    var(--ui-skeleton-a)
   );
   background-size: 200% 100%;
   animation: shimmer 1.8s linear infinite;
