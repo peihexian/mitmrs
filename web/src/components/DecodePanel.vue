@@ -114,7 +114,22 @@ function reset(): void {
   error.value = ''
 }
 
-watch([direction, format], reset)
+watch([direction, format], () => {
+  reset()
+  // Keep the view in sync: switching direction or format re-runs the decoder
+  // instead of leaving an empty panel behind.
+  void runDecode()
+})
+
+// A background detail refresh can hand over a new flow object for the same
+// panel instance; re-decode when the flow itself changes.
+watch(
+  () => props.flow.id,
+  () => {
+    reset()
+    void runDecode()
+  },
+)
 
 async function runDecode(): Promise<void> {
   controller?.abort()
@@ -163,6 +178,9 @@ onMounted(async () => {
   } catch (decoderError) {
     if (!isAbortError(decoderError)) decoders.value = []
   }
+  // Opening the Decode tab is already an explicit request to inspect the wire
+  // format, so run auto-detect instead of making the user click Decode first.
+  void runDecode()
 })
 
 onBeforeUnmount(() => {

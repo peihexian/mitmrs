@@ -103,6 +103,8 @@ Decoders take the stored flow, direction, headers, trailers, raw bytes and an op
 
 `auto` uses content-type first (gRPC, JSON, XML, form, multipart, SSE, protobuf), then content-encoding decompression, then content sniffing (JSON/XML/text), then a gRPC frame heuristic, then a raw hex dump. This is deliberately conservative: the user can always force a format.
 
+The body viewer is separate from the decoder pipeline: `store::body_view` calls `decode::decode_wire_body` so a `Content-Encoding` body is inflated before it reaches the UI. That path keeps the captured prefix when the stream was truncated, reports the encoding and inflated size in `BodyView.body_decoded`, and keeps the raw wire bytes in `body_base64` so hex/download still show what crossed the network. Plaintext bodies are untouched (no inflated payload, no base64).
+
 gRPC parsing handles the 5-byte frame header, compressed flags, gRPC-Web base64 and trailer frames, and per-message compression. Protobuf is schema-less: field number/wire type, varints, fixed32/64, length-delimited strings, recursively plausible nested messages, packed varints and hex. It never claims schema knowledge; `meta.schema` is null.
 
 ## MCP

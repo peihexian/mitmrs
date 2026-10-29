@@ -70,6 +70,22 @@ pub struct BodyView {
     pub body_text: Option<String>,
     pub body_encoding: Option<String>,
     pub content_type: Option<String>,
+    /// Present when the wire body was compressed and got inflated for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_decoded: Option<BodyDecoded>,
+}
+
+/// Metadata about a transparently decompressed body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BodyDecoded {
+    /// Content-Encoding that was applied, e.g. `gzip`, `br`, `gzip + br`.
+    pub encoding: String,
+    /// Size of the inflated payload in bytes.
+    pub decoded_size: u64,
+    /// True when `body_text` holds the inflated payload. False when the payload
+    /// stayed binary (images, protobuf, ...) and only the hex view applies.
+    pub text: bool,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

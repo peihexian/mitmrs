@@ -115,6 +115,83 @@ pub fn decompress(data: &[u8], encoding: &str, limit: usize) -> Result<Vec<u8>, 
     Ok(out)
 }
 
+/// Result of a tolerant decompression pass.
+#[derive(Debug, Clone)]
+pub struct Inflated {
+    pub data: Vec<u8>,
+    /// False when the stream was cut short (truncated capture) or the output
+    /// limit was reached before the end of the stream.
+    pub complete: bool,
+}
+
+/// Like [`decompress`], but keeps the bytes that could be inflated instead of
+/// failing outright when the captured body is a truncated prefix of the
+/// compressed stream. Used by the body viewer, which has to work with whatever
+/// the capture size limit kept on disk.
+pub fn inflate_relaxed(data: &[u8], encoding: &str, limit: usize) -> Result<Inflated, String> {
+    let enc = encoding.trim().to_ascii_lowercase();
+    if enc.is_empty() || enc == "identity" {
+        return Ok(Inflated {
+            data: data.to_vec(),
+            complete: true,
+        });
+    }
+    let limit = limit.max(1);
+    let mut out = Vec::new();
+    let read = match enc.as_str() {
+        "gzip" | "x-gzip" => flate2::read::GzDecoder::new(data)
+            .take(limit as u64)
+            .read_to_end(&mut out),
+        "deflate" => {
+            let mut zlib_out = Vec::new();
+            match flate2::read::ZlibDecoder::new(data)
+                .take(limit as u64)
+                .read_to_end(&mut zlib_out)
+            {
+                Ok(n) => {
+                    out = zlib_out;
+                    Ok(n)
+                }
+                Err(_) => {
+                    let mut raw_out = Vec::new();
+                    let r = flate2::read::DeflateDecoder::new(data)
+                        .take(limit as u64)
+                        .read_to_end(&mut raw_out);
+                    out = raw_out;
+                    r
+                }
+            }
+        }
+        "br" => brotli::Decompressor::new(data, 4096)
+            .take(limit as u64)
+            .read_to_end(&mut out),
+        "zstd" => zstd::stream::read::Decoder::new(data)
+            .map_err(|e| e.to_string())?
+            .take(limit as u64)
+            .read_to_end(&mut out),
+        other => return Err(format!("unsupported content-encoding: {other}")),
+    };
+    match read {
+        Ok(_) => {
+            let complete = out.len() < limit;
+            Ok(Inflated {
+                data: out,
+                complete,
+            })
+        }
+        Err(e) => {
+            if out.is_empty() {
+                Err(format!("decompress {enc} failed: {e}"))
+            } else {
+                Ok(Inflated {
+                    data: out,
+                    complete: false,
+                })
+            }
+        }
+    }
+}
+
 pub fn safe_truncate_utf8(mut s: String, max: usize) -> String {
     if s.len() <= max {
         return s;

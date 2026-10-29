@@ -1,4 +1,5 @@
-use crate::decode::util::is_probably_text;
+use crate::decode;
+use crate::decode::util::{is_probably_text, safe_truncate_utf8};
 use crate::model::*;
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -1151,7 +1152,12 @@ fn body_view(
 ) -> BodyView {
     let take = body.len().min(max_bytes);
     let slice = &body[..take];
-    let (body_base64, body_text) = match mode {
+    let encoding = headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("content-encoding"))
+        .map(|h| h.value.clone());
+    let wants_text = !matches!(mode, "none" | "base64");
+    let (mut body_base64, mut body_text) = match mode {
         "none" => (None, None),
         "base64" => (Some(B64.encode(slice)), None),
         "both" => (
@@ -1160,10 +1166,31 @@ fn body_view(
         ),
         _ => (None, Some(String::from_utf8_lossy(slice).into_owned())),
     };
-    let encoding = headers
-        .iter()
-        .find(|h| h.name.eq_ignore_ascii_case("content-encoding"))
-        .map(|h| h.value.clone());
+    // Captures store the exact wire bytes, so compressed bodies are unreadable
+    // until they are inflated. Do that here so opening the Request/Response tab
+    // shows plaintext instead of forcing a manual trip to the Decode panel.
+    let mut body_decoded = None;
+    if wants_text && !slice.is_empty() {
+        let decode_limit = max_bytes.clamp(64 * 1024, 8 * 1024 * 1024);
+        if let Some(wire) = decode::decode_wire_body(slice, encoding.as_deref(), decode_limit) {
+            let text_payload = is_probably_text(&wire.data);
+            if text_payload {
+                body_text = Some(safe_truncate_utf8(
+                    String::from_utf8_lossy(&wire.data).into_owned(),
+                    max_bytes,
+                ));
+            }
+            // Keep the raw wire prefix available so the hex view and downloads
+            // still reflect what actually crossed the network.
+            body_base64 = Some(B64.encode(slice));
+            body_decoded = Some(BodyDecoded {
+                encoding: wire.encoding,
+                decoded_size: wire.data.len() as u64,
+                text: text_payload,
+                truncated: wire.truncated || (text_payload && wire.data.len() > max_bytes),
+            });
+        }
+    }
     BodyView {
         headers: headers.to_vec(),
         trailers: trailers.to_vec(),
@@ -1173,6 +1200,7 @@ fn body_view(
         body_text,
         body_encoding: encoding,
         content_type: content_type.map(|s| s.to_string()),
+        body_decoded,
     }
 }
 

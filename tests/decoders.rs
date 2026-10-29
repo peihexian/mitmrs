@@ -200,6 +200,57 @@ fn parses_client_hello_metadata() {
     assert!(decode::formats::parse_client_hello(&hs[..hs.len() - 1]).is_none());
 }
 
+fn gzip_bytes(raw: &[u8]) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(raw).unwrap();
+    encoder.finish().unwrap()
+}
+
+#[test]
+fn auto_decodes_wire_body_from_header_or_magic() {
+    let raw = br#"{"gzip":true,"note":"wire decode"}"#;
+    let gz = gzip_bytes(raw);
+
+    let from_header = decode::decode_wire_body(&gz, Some("gzip"), 1_000_000)
+        .expect("declared gzip should decode");
+    assert_eq!(from_header.encoding, "gzip");
+    assert_eq!(from_header.data, raw);
+    assert!(!from_header.truncated);
+
+    // Captures imported from HAR or older builds may have lost the header.
+    let sniffed =
+        decode::decode_wire_body(&gz, None, 1_000_000).expect("gzip magic should be sniffed");
+    assert_eq!(sniffed.encoding, "gzip");
+    assert_eq!(sniffed.data, raw);
+
+    // Plaintext must be left untouched.
+    assert!(decode::decode_wire_body(raw, None, 1_000_000).is_none());
+    assert!(decode::decode_wire_body(raw, Some("identity"), 1_000_000).is_none());
+}
+
+#[test]
+fn auto_decodes_stacked_content_encoding() {
+    let raw = br#"{"stacked":true}"#;
+    // Content-Encoding: zstd, gzip means zstd was applied first, then gzip.
+    let zstd = zstd::encode_all(&raw[..], 3).unwrap();
+    let wire = gzip_bytes(&zstd);
+    let found = decode::decode_wire_body(&wire, Some("zstd, gzip"), 1_000_000)
+        .expect("stacked encodings should decode");
+    assert_eq!(found.data, raw);
+    assert_eq!(found.encoding, "gzip + zstd");
+}
+
+#[test]
+fn keeps_prefix_of_truncated_gzip_body() {
+    let raw = vec![b'a'; 64 * 1024];
+    let gz = gzip_bytes(&raw);
+    let cut = &gz[..gz.len() * 2 / 3];
+    let found =
+        decode::decode_wire_body(cut, Some("gzip"), 1_000_000).expect("partial gzip should decode");
+    assert!(!found.data.is_empty());
+    assert!(found.truncated);
+}
+
 #[test]
 fn decodes_form_and_websocket() {
     let rec = record(b"name=%E5%BC%A0%E4%B8%89&n=42", b"");

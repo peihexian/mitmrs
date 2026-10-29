@@ -34,6 +34,7 @@
   - 显式代理：默认 `127.0.0.1:8080`，浏览器、curl、Python/Node SDK 直接设置 HTTP/HTTPS 代理。
   - WinDivert 透明重定向（可选，需管理员）：把本机出站 TCP `:80/:443` 重定向到本地代理，客户端无需配置代理。
 - **Web 分析界面**：流量列表、搜索/过滤、请求/响应/Headers/Trailers、JSON 美化、hex/raw、cURL 生成、SSE 实时刷新、解码树、MCP 示例；左侧过滤栏、中间列表、右侧详情三块区域都支持鼠标拖动分隔条调整宽度（双击或按 Home 复位、方向键微调、宽度自动记忆），右侧详情默认更宽，请求/响应正文更容易阅读；支持深色/浅色主题一键切换（会记住选择，首次按系统偏好）；支持每页 100/200/500 条翻页、单条删除与一键清空（带确认）。
+- **压缩 body 自动解码**：请求/响应标签页遇到 `Content-Encoding: gzip`（以及 br/deflate/zstd、多级编码；header 缺失时按 gzip/zstd/zlib magic 嗅探）会自动解压并直接显示明文，不再需要手动进入 Decode 面板点解码；顶部显示解压前后大小，可一键在“解码后的内容”和“线上原始字节（hex）”之间切换，被截断的 body 也会尽量解出可用前缀。解码面板打开时会自动跑一次 auto 解码。
 - **AI 优先的 MCP 服务**：Streamable HTTP JSON-RPC 2.0 端点 `/mcp`，另有 `mcp-stdio` 桥接模式。AI 可以列出最近流量、分页搜索全部结果、过滤、读取上下行 body、切换解码格式、导出/导入、启停代理。
 - **内置解码器**：auto、HTTP 消息、HTTP/2、gRPC/gRPC-Web、Protobuf（无 `.proto`）、JSON、XML/HTML、表单、multipart、SSE、WebSocket 帧、TLS records/SNI、文本（含 GBK 等字符集）、base64、hex、gzip/deflate/brotli/zstd、raw。
 - **生命周期控制**：启动、停止、暂停、恢复、重启、运行时修改代理端口（自动重启监听）、开启/关闭抓包、MCP 同步控制。
@@ -323,7 +324,7 @@ curl http://127.0.0.1:8787/mcp `
 |---|---|---|
 | GET | `/api/status` | 代理、存储、CA、MCP、配置状态 |
 | GET | `/api/flows` | 搜索/分页，参数同 `traffic_search` |
-| GET | `/api/flows/{id}` | 单条详情；`?body=text\|base64\|both\|none` |
+| GET | `/api/flows/{id}` | 单条详情；`?body=text\|base64\|both\|none`；压缩 body 自动解压，`body_decoded` 给出编码/解压后大小 |
 | GET | `/api/flows/{id}/body` | 原始 body |
 | POST | `/api/flows/{id}/decode` | 切换解码格式 |
 | DELETE | `/api/flows/{id}` | 删除单条 |

@@ -31,11 +31,14 @@ let copyTimer: number | null = null
 
 const rawText = computed(() => bodyText(props.view, 4 * 1024 * 1024))
 const bytes = computed(() => bodyBytes(props.view))
-const binary = computed(() => {
+const decoded = computed(() => props.view?.body_decoded ?? null)
+const wireBinary = computed(() => {
   if (!props.view) return false
   if (bytes.value.length === 0) return false
   return looksBinary(bytes.value)
 })
+// A decompressed payload can be plaintext even though the wire bytes are not.
+const binary = computed(() => (decoded.value?.text ? false : wireBinary.value))
 const hasText = computed(() => rawText.value != null && !binary.value)
 const hasBody = computed(() => {
   if (!props.view) return false
@@ -62,6 +65,30 @@ const contentLabel = computed(() => {
   if (!props.view) return 'No body'
   return props.view.content_type || 'unknown content type'
 })
+const decodedLabel = computed(() => {
+  if (!decoded.value) return ''
+  return `${decoded.value.encoding} → ${formatBytes(decoded.value.decoded_size)}`
+})
+const decodedTitle = computed(() => {
+  const info = decoded.value
+  if (!info) return ''
+  const parts = [
+    `Decoded automatically from Content-Encoding: ${info.encoding}`,
+    `wire body ${formatBytes(props.view?.body_size)} → ${formatBytes(info.decoded_size)} decoded`,
+  ]
+  if (info.truncated) parts.push('decoded output is truncated')
+  if (!info.text) parts.push('the decoded payload is binary; use the Decode tab for field-level output')
+  return parts.join(' · ')
+})
+const headerLabel = computed(() => {
+  if (mode.value === 'hex') return decoded.value ? 'Hex dump (wire bytes)' : 'Hex dump'
+  if (mode.value === 'pretty') {
+    return decoded.value?.text
+      ? `${formatted.value.language} (decoded)`
+      : formatted.value.language
+  }
+  return decoded.value?.text ? 'Raw (decoded)' : 'Raw'
+})
 const downloadExtension = computed(() => {
   const type = (props.view?.content_type || '').toLowerCase()
   if (type.includes('json')) return 'json'
@@ -77,7 +104,11 @@ const downloadExtension = computed(() => {
 watch(
   () => props.view,
   () => {
-    mode.value = binary.value ? 'hex' : 'pretty'
+    mode.value = decoded.value?.text
+      ? 'pretty'
+      : wireBinary.value
+        ? 'hex'
+        : 'pretty'
     copied.value = false
   },
   { immediate: true },
@@ -99,6 +130,17 @@ async function onCopy(): Promise<void> {
 
 function onDownload(): void {
   if (!hasBody.value) return
+  if (decoded.value?.text) {
+    // Download the readable payload rather than the compressed wire bytes.
+    const blob = new Blob([rawText.value ?? ''], {
+      type: 'text/plain;charset=utf-8',
+    })
+    downloadBlob(
+      blob,
+      `${props.filenamePrefix}-${props.direction}.${downloadExtension.value}`,
+    )
+    return
+  }
   const blobBytes =
     bytes.value.length > 0
       ? bytes.value
@@ -148,7 +190,12 @@ defineExpose({
           :title="contentLabel"
         >{{ contentLabel }}</span>
         <span
-          v-if="view?.body_encoding"
+          v-if="decoded"
+          class="rounded border border-accent-500/25 bg-accent-500/[0.08] px-1 py-px font-mono text-[8.5px] text-accent-300"
+          :title="decodedTitle"
+        >{{ decodedLabel }}</span>
+        <span
+          v-else-if="view?.body_encoding"
           class="rounded border border-sky-500/20 bg-sky-500/[0.06] px-1 py-px font-mono text-[8.5px] text-sky-400"
           :title="`Body encoding: ${view.body_encoding}`"
         >{{ view.body_encoding }}</span>
@@ -173,7 +220,7 @@ defineExpose({
           <button
             type="button"
             :class="{ 'is-active': mode === 'hex' }"
-            title="Hex dump"
+            :title="decoded ? 'Hex dump of the raw (compressed) wire bytes' : 'Hex dump'"
             @click="mode = 'hex'"
           >Hex</button>
         </div>
@@ -191,8 +238,8 @@ defineExpose({
           class="icon-btn icon-btn-sm"
           type="button"
           :disabled="!hasBody"
-          title="Download body"
-          aria-label="Download body"
+          :title="decoded?.text ? 'Download decoded body' : 'Download body'"
+          :aria-label="decoded?.text ? 'Download decoded body' : 'Download body'"
           @click="onDownload"
         >
           <AppIcon name="download" :size="13" />
@@ -201,11 +248,37 @@ defineExpose({
     </div>
 
     <div
+      v-if="decoded"
+      class="flex shrink-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-b border-accent-500/15 bg-accent-500/[0.045] px-3 py-1 text-[9.5px] leading-relaxed text-accent-200/80"
+    >
+      <AppIcon name="wand" :size="11" class="shrink-0" />
+      <span>
+        Auto-decoded <span class="font-mono">{{ decoded.encoding }}</span>:
+        {{ formatBytes(view?.body_size) }} on the wire →
+        {{ formatBytes(decoded.decoded_size) }}{{ decoded.text ? ' of text' : ' of binary payload' }}.
+      </span>
+      <button
+        v-if="hasText"
+        class="badge ml-auto border-accent-500/25 bg-accent-500/[0.08] text-accent-300"
+        type="button"
+        :title="mode === 'hex' ? 'Show the decoded payload' : 'Show the raw compressed bytes'"
+        @click="mode = mode === 'hex' ? 'pretty' : 'hex'"
+      >{{ mode === 'hex' ? 'Show decoded' : 'Show wire bytes' }}</button>
+    </div>
+
+    <div
       v-if="view?.truncated"
       class="flex shrink-0 items-center gap-1.5 border-b border-amber-500/15 bg-amber-500/[0.045] px-3 py-1 text-[9.5px] text-amber-300/80"
     >
       <AppIcon name="alert-triangle" :size="11" />
       Body truncated by the capture size limit. Download contains the captured prefix.
+    </div>
+    <div
+      v-else-if="decoded?.truncated"
+      class="flex shrink-0 items-center gap-1.5 border-b border-amber-500/15 bg-amber-500/[0.045] px-3 py-1 text-[9.5px] text-amber-300/80"
+    >
+      <AppIcon name="alert-triangle" :size="11" />
+      Decoded output truncated. Open the Decode tab to see the payload in full.
     </div>
 
     <div v-if="!hasBody" class="flex flex-1 flex-col items-center justify-center px-6 text-center">
@@ -221,7 +294,7 @@ defineExpose({
     <div v-else class="app-scroll relative min-h-0 flex-1 overflow-auto bg-[var(--ui-sunken)]">
       <div class="sticky top-0 z-[1] flex h-6 items-center justify-between border-b border-ink-700/40 bg-ink-925/85 px-3 backdrop-blur-sm">
         <span class="font-mono text-[8.5px] uppercase tracking-[0.08em] text-mist-700">
-          {{ mode === 'hex' ? 'Hex dump' : mode === 'pretty' ? formatted.language : 'Raw' }}
+          {{ headerLabel }}
         </span>
         <span class="font-mono text-[8.5px] tabular-nums text-mist-700">{{ lineCount }} lines</span>
       </div>

@@ -90,6 +90,13 @@ export interface HeaderEntry {
   value: string
 }
 
+export interface BodyDecoded {
+  encoding: string
+  decoded_size: number
+  text: boolean
+  truncated: boolean
+}
+
 export interface BodyView {
   headers: HeaderEntry[]
   trailers: HeaderEntry[]
@@ -99,6 +106,7 @@ export interface BodyView {
   body_text: string | null
   body_encoding: string | null
   content_type: string | null
+  body_decoded?: BodyDecoded | null
 }
 
 export interface FlowDetail extends FlowSummary {

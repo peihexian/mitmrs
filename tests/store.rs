@@ -1,6 +1,9 @@
 use chrono::Utc;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use mitmrs::model::{FlowRecord, HeaderEntry, SearchQuery};
 use mitmrs::store::Store;
+use std::io::Write;
 use std::path::PathBuf;
 
 fn flow(seq: usize, body: &str, host: &str) -> FlowRecord {
@@ -131,6 +134,9 @@ async fn insert_search_get_export_import() {
     let id = found.items[0].id.clone();
     let detail = store.get(&id, "text", 1_000_000).await.unwrap().unwrap();
     assert!(detail.request.body_text.unwrap().contains("needle"));
+    // Plaintext bodies are left exactly as captured.
+    assert!(detail.request.body_decoded.is_none());
+    assert!(detail.request.body_base64.is_none());
 
     let json = store
         .export_json(&SearchQuery::default(), 100)
@@ -154,6 +160,42 @@ async fn insert_search_get_export_import() {
         .unwrap();
     let result = store3.import_json(&har).await.unwrap();
     assert_eq!(result.imported, 3);
+}
+
+#[tokio::test]
+async fn detail_view_inflates_compressed_bodies() {
+    let (store, _dir) = temp_store().await;
+    let payload = br#"{"gzip":true,"hint":"auto-decoded"}"#;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(payload).unwrap();
+    let gz = encoder.finish().unwrap();
+
+    let mut record = flow(11, "{}", "gz.example");
+    record.response_headers = vec![
+        HeaderEntry::new("content-type", "application/json"),
+        HeaderEntry::new("content-encoding", "gzip"),
+    ];
+    record.response_mime = Some("application/json".into());
+    record.response_body = gz.clone();
+    record.response_body_size = gz.len() as u64;
+    store.insert(record).await.unwrap();
+
+    let found = store.search(&SearchQuery::default()).await.unwrap();
+    let id = found.items[0].id.clone();
+    let detail = store.get(&id, "text", 1_000_000).await.unwrap().unwrap();
+    let decoded = detail
+        .response
+        .body_decoded
+        .expect("gzip response should be auto-decoded");
+    assert_eq!(decoded.encoding, "gzip");
+    assert!(decoded.text);
+    assert!(!decoded.truncated);
+    assert_eq!(
+        detail.response.body_text.as_deref(),
+        Some(String::from_utf8_lossy(payload).as_ref())
+    );
+    // The raw wire bytes stay available for the hex view and downloads.
+    assert!(detail.response.body_base64.is_some());
 }
 
 #[tokio::test]

@@ -5,7 +5,8 @@ pub mod util;
 
 use crate::decode::formats::*;
 use crate::decode::util::{
-    decompress, is_probably_text, json_text, printable_ratio, safe_truncate_utf8, short_preview,
+    decompress, inflate_relaxed, is_probably_text, json_text, printable_ratio, safe_truncate_utf8,
+    short_preview,
 };
 use crate::model::{DecodeResult, DecoderInfo, DecoderOption, FlowRecord, HeaderEntry};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -299,6 +300,117 @@ pub fn decode_message(
         other => return Err(format!("unknown decoder format '{other}'")),
     };
     Ok(result)
+}
+
+/// A captured wire body that was transparently inflated for the viewer.
+#[derive(Debug, Clone)]
+pub struct WireBody {
+    pub data: Vec<u8>,
+    pub encoding: String,
+    pub truncated: bool,
+}
+
+/// Try to turn a captured wire body into readable plaintext.
+///
+/// The capture stores exactly what crossed the wire, so gzip/deflate/brotli/zstd
+/// payloads stay opaque until they are inflated. This does that automatically:
+/// it prefers the declared `Content-Encoding` (stacked encodings included),
+/// falls back to magic-number sniffing, and returns `None` when the body already
+/// is plaintext or nothing inflates cleanly.
+pub fn decode_wire_body(
+    body: &[u8],
+    content_encoding: Option<&str>,
+    limit: usize,
+) -> Option<WireBody> {
+    if body.is_empty() {
+        return None;
+    }
+    let limit = limit.clamp(1024, 64 * 1024 * 1024);
+    let declared: Vec<String> = content_encoding
+        .unwrap_or("")
+        .split(',')
+        .map(|part| part.trim().to_ascii_lowercase())
+        .filter(|part| !part.is_empty() && part != "identity")
+        .collect();
+    if !declared.is_empty() {
+        // Header order is the order the encodings were applied, so undo them in
+        // reverse (and try the literal order as a lenient fallback).
+        let reversed: Vec<&str> = declared.iter().rev().map(|s| s.as_str()).collect();
+        if let Some(found) = inflate_chain(body, &reversed, limit) {
+            return Some(found);
+        }
+        let forward: Vec<&str> = declared.iter().map(|s| s.as_str()).collect();
+        if let Some(found) = inflate_chain(body, &forward, limit) {
+            return Some(found);
+        }
+    }
+    sniff_wire_body(body, limit)
+}
+
+fn inflate_chain(body: &[u8], encodings: &[&str], limit: usize) -> Option<WireBody> {
+    let mut data = body.to_vec();
+    let mut used: Vec<String> = Vec::new();
+    let mut truncated = false;
+    for enc in encodings {
+        let inflated = inflate_relaxed(&data, enc, limit).ok()?;
+        if inflated.data.is_empty() {
+            return None;
+        }
+        truncated |= !inflated.complete;
+        data = inflated.data;
+        used.push((*enc).to_string());
+    }
+    if used.is_empty() {
+        return None;
+    }
+    Some(WireBody {
+        data,
+        encoding: used.join(" + "),
+        truncated,
+    })
+}
+
+fn sniff_wire_body(body: &[u8], limit: usize) -> Option<WireBody> {
+    // Plaintext needs no work; guessing at it only risks false positives.
+    if is_probably_text(body) && printable_ratio(body) > 0.9 {
+        return None;
+    }
+    let mut candidates: Vec<&str> = Vec::new();
+    if body.starts_with(&[0x1f, 0x8b]) {
+        candidates.push("gzip");
+    }
+    if body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        candidates.push("zstd");
+    }
+    if body.len() >= 2 && body[0] == 0x78 && matches!(body[1], 0x01 | 0x5e | 0x9c | 0xda) {
+        candidates.push("deflate");
+    }
+    for enc in ["gzip", "zstd", "deflate", "br"] {
+        if !candidates.contains(&enc) {
+            candidates.push(enc);
+        }
+    }
+    for enc in candidates {
+        let Ok(inflated) = inflate_relaxed(body, enc, limit) else {
+            continue;
+        };
+        if inflated.data.is_empty() || !plausible_payload(&inflated.data) {
+            continue;
+        }
+        return Some(WireBody {
+            data: inflated.data,
+            encoding: enc.to_string(),
+            truncated: !inflated.complete,
+        });
+    }
+    None
+}
+
+fn plausible_payload(data: &[u8]) -> bool {
+    is_probably_text(data)
+        || util::looks_like_json(data)
+        || util::looks_like_xml(data)
+        || printable_ratio(data) > 0.75
 }
 
 #[allow(clippy::too_many_arguments)]
